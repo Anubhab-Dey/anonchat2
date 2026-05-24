@@ -1,19 +1,26 @@
-import { state, activeConversation, cleanUsername } from "./state.js";
+import { state, activeConversation, cleanUsername, hasTurnRelayConfigured } from "./state.js";
 import { els } from "./dom.js";
 import { showToast } from "./toast.js";
 import { addSystemMessage, hideIncomingCall, setCallStatus, showIncomingCall } from "./ui.js";
-import { requestDirectPeer } from "./direct.js";
+import { rememberDirectPeer, requestDirectPeer } from "./direct.js";
 import { upsertConversation, openConversation } from "./conversations.js";
 import { directConversationId } from "./state.js";
 import {
   ensureLocalMedia,
   ensurePeerConnection,
+  createRelayPeerConnection,
   addLocalTracksTo,
   negotiate,
   stopP2PMedia,
   setPeerCallHandler,
 } from "./call-p2p.js";
-import { markTurnFallback, sendCallInvite, sendCallEnd, sendCallAccept, sendCallDecline } from "./call-relay.js";
+import {
+  decryptCallInvitePayload,
+  sendCallInvite,
+  sendCallEnd,
+  sendCallAccept,
+  sendCallDecline,
+} from "./call-relay.js";
 
 const P2P_TIMEOUT_MS = 10000;
 
@@ -45,6 +52,7 @@ export function createCallSession(options) {
     relay_connected_at: null,
     ended_at: null,
     fallbackTimer: null,
+    peerIds: Array.isArray(options.peerIds) ? options.peerIds : [],
     incoming: Boolean(options.incoming),
   };
   state.calls.sessions.set(session.call_id, session);
@@ -142,12 +150,19 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
 
   callSession.call_state = "connecting_p2p";
   callSession.p2p_started_at = Date.now();
+  callSession.peerIds = callSession.call_kind === "direct" ?
+    [callSession.peerId].filter(Boolean) :
+    [...(roomPeerIds || [...state.peers.keys()])];
   setCallStatus("Connecting securely...", "warn");
 
   clearTimeout(callSession.fallbackTimer);
   callSession.fallbackTimer = setTimeout(() => {
     if (!callSession.selected_transport && callSession.call_state === "connecting_p2p") {
-      markTurnFallback(callSession);
+      startRelayFallback(callSession).catch(() => {
+        callSession.call_state = "failed";
+        callSession.ended_at = Date.now();
+        setCallStatus("Call failed", "bad");
+      });
     }
   }, P2P_TIMEOUT_MS);
 
@@ -168,6 +183,74 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
 
   for (const peerId of roomPeerIds || [...state.peers.keys()]) {
     const pc = ensurePeerConnection(peerId);
+    addLocalTracksTo(pc);
+    await negotiate(peerId);
+  }
+}
+
+export async function startRelayFallback(callSession) {
+  if (!callSession ||
+      callSession.selected_transport ||
+      callSession.relay_started_at ||
+      callSession.call_state === "ended" ||
+      callSession.call_state === "failed") {
+    return;
+  }
+
+  clearTimeout(callSession.fallbackTimer);
+
+  if (!hasTurnRelayConfigured()) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
+    showToast("Relay unavailable", "warning");
+    return;
+  }
+
+  const ok = await ensureLocalMedia();
+
+  if (!ok) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    return;
+  }
+
+  callSession.call_state = "connecting_relay";
+  callSession.relay_started_at = Date.now();
+  setCallStatus("Connecting securely...", "warn");
+  showToast("Trying relay-capable reconnect", "info");
+
+  if (callSession.call_kind === "direct") {
+    if (!callSession.peerId || !callSession.peerPublicWire) {
+      callSession.call_state = "failed";
+      callSession.ended_at = Date.now();
+      setCallStatus("Call failed", "bad");
+      return;
+    }
+
+    const pc = createRelayPeerConnection(callSession.peerId, {
+      kind: "direct",
+      username: callSession.callee_username || callSession.caller_username || callSession.target,
+      publicWire: callSession.peerPublicWire,
+    });
+    addLocalTracksTo(pc);
+    await negotiate(callSession.peerId);
+    return;
+  }
+
+  const peerIds = callSession.peerIds.length > 0 ? callSession.peerIds : [...state.peers.keys()];
+
+  if (peerIds.length === 0) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Call failed", "bad");
+    return;
+  }
+
+  callSession.peerIds = peerIds;
+
+  for (const peerId of peerIds) {
+    const pc = createRelayPeerConnection(peerId, { kind: "room" });
     addLocalTracksTo(pc);
     await negotiate(peerId);
   }
@@ -219,10 +302,27 @@ export async function handleCallEvent(parts) {
   const eventType = parts[1];
   const callId = parts[2];
   const fromUsername = parts[3];
+  const serverNow = Number(parts[4] || 0) || null;
+  const encryptedPayload = parts[5];
+  const fromPeerId = parts[6] || "";
+  const fromPublicWire = parts[7] || "";
   const session = state.calls.sessions.get(callId);
 
   if (eventType === "invite") {
-    await handleIncomingInvite(callId, fromUsername);
+    let invite = null;
+
+    try {
+      invite = await decryptCallInvitePayload(callId, fromUsername, encryptedPayload, {
+        username: fromUsername,
+        peerId: fromPeerId,
+        publicWire: fromPublicWire,
+      });
+    } catch {
+      showToast("Could not read incoming call", "warning");
+      return;
+    }
+
+    await handleIncomingInvite(invite.payload, fromUsername, serverNow, invite.directPeer);
     return;
   }
 
@@ -249,30 +349,30 @@ export async function handleCallEvent(parts) {
   }
 }
 
-async function handleIncomingInvite(callId, fromUsername) {
-  let peer = null;
+async function handleIncomingInvite(payload, fromUsername, serverNow, directPeer = null) {
+  const callerUsername = payload.caller_username || fromUsername;
+  const room = payload.room || payload.target || state.room;
 
-  try {
-    peer = await requestDirectPeer(fromUsername, { fresh: true });
-  } catch {
-    peer = null;
+  if (payload.call_kind === "direct" && directPeer && directPeer.peerId && directPeer.publicWire) {
+    rememberDirectPeer(callerUsername, directPeer.peerId, directPeer.publicWire);
   }
 
   const session = createCallSession({
-    call_id: callId,
-    call_kind: peer ? "direct" : "room",
-    caller_username: fromUsername,
+    call_id: payload.call_id,
+    call_kind: payload.call_kind,
+    caller_username: callerUsername,
     callee_username: state.username,
-    target: peer ? fromUsername : state.room,
-    room: peer ? null : state.room,
+    target: payload.call_kind === "direct" ? callerUsername : room,
+    room: payload.call_kind === "room" ? room : null,
     roomSecret: state.pendingRoomSecret || els.roomKey.value,
-    peerId: peer ? peer.peerId : null,
-    peerPublicWire: peer ? peer.publicWire : "",
+    peerId: directPeer ? directPeer.peerId : null,
+    peerPublicWire: directPeer ? directPeer.publicWire : "",
     incoming: true,
   });
+  session.server_now = serverNow;
   session.call_state = "ringing";
-  addSystemMessage(`incoming call from ${fromUsername}`);
-  showToast(`Incoming call from ${fromUsername}`, "info");
+  addSystemMessage(`incoming call from ${callerUsername}`);
+  showToast(`Incoming call from ${callerUsername}`, "info");
   setCallStatus("Incoming call", "warn");
   showIncomingCall(
     session,
@@ -311,14 +411,21 @@ async function declineIncomingCall(callSession) {
   setCallStatus("Call declined", "warn");
 }
 
-function handleP2PState(peerId, value, transport = "p2p") {
+function handleP2PState(peerId, value, transport = null) {
   const callSession = state.calls.active;
 
-  if (!callSession || callSession.selected_transport === "server_relay") {
+  if (!callSession ||
+      callSession.selected_transport === "server_relay" ||
+      callSession.call_state === "ended" ||
+      callSession.call_state === "failed") {
     return;
   }
 
   if (value === "connected" || value === "completed") {
+    if (callSession.relay_started_at && transport !== "server_relay") {
+      return;
+    }
+
     selectCallTransport(callSession, transport === "server_relay" ? "server_relay" : "p2p");
     return;
   }
@@ -328,9 +435,20 @@ function handleP2PState(peerId, value, transport = "p2p") {
     setCallStatus("Reconnecting...", "warn");
     setTimeout(() => {
       if (!callSession.selected_transport) {
-        markTurnFallback(callSession);
+        startRelayFallback(callSession).catch(() => {
+          callSession.call_state = "failed";
+          callSession.ended_at = Date.now();
+          setCallStatus("Call failed", "bad");
+        });
       }
     }, 1000);
+    return;
+  }
+
+  if ((value === "failed" || value === "disconnected") && callSession.call_state === "connecting_relay") {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
   }
 }
 

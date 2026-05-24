@@ -24,11 +24,12 @@ Current state:
 - The backend keeps `CALL_INVITE`, `CALL_ACCEPT`, `CALL_DECLINE`, and `CALL_END`.
 - These commands carry opaque encrypted payloads and are for call state/ringer/event flow only.
 - Media fallback is handled by WebRTC ICE/TURN, not custom `CALL_RELAY` frames.
+- Incoming call invites are classified from decrypted invite metadata, not from direct-user lookup guesses.
+- The browser can restart call peer connections with relay-only ICE when trusted TURN servers are configured.
 
 Next pass:
-1. Finish incoming call accept/decline UI around the existing call event commands.
-2. Add missed-call and active-device push hooks after VAPID is implemented.
-3. Keep the call-event payload encrypted; do not add plaintext call metadata beyond routing fields.
+1. Add missed-call and active-device push hooks after VAPID is implemented.
+2. Keep the call-event payload encrypted; do not add plaintext call metadata beyond routing fields needed for routing/key discovery.
 
 ## VAPID Push Delivery
 

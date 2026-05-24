@@ -1,9 +1,7 @@
-import { state, hasTurnRelayConfigured } from "./state.js";
+import { state } from "./state.js";
 import { sendWire } from "./wire.js";
-import { encryptJson, derivePbkdf2Key } from "./crypto-box.js";
+import { encryptJson, decryptJson, derivePbkdf2Key } from "./crypto-box.js";
 import { deriveDirectKey } from "./direct.js";
-import { showToast } from "./toast.js";
-import { setCallStatus } from "./ui.js";
 
 export async function sendCallInvite(callSession) {
   const payload = await encryptCallEventPayload(callSession, {
@@ -11,6 +9,11 @@ export async function sendCallInvite(callSession) {
     call_id: callSession.call_id,
     call_kind: callSession.call_kind,
     caller_username: state.username,
+    target: callSession.target || callSession.callee_username || callSession.room || "",
+    room: callSession.call_kind === "room" ? callSession.room || callSession.target || null : null,
+    callee_username: callSession.call_kind === "direct" ?
+      callSession.callee_username || callSession.target || null :
+      null,
     at: Date.now(),
   });
   sendWire(`CALL_INVITE|${callSession.call_id}|${callSession.call_kind}|${callSession.target}|${payload}`);
@@ -47,23 +50,25 @@ export async function sendCallDecline(callSession) {
   sendWire(`CALL_DECLINE|${callSession.call_id}|${payload}`);
 }
 
-export function markTurnFallback(callSession) {
-  if (!callSession || callSession.selected_transport) {
-    return;
+export async function decryptCallInvitePayload(callId, fromUsername, encryptedPayload, senderPeer = null) {
+  const roomResult = await tryDecryptCurrentRoomInvite(callId, encryptedPayload);
+
+  if (roomResult) {
+    return roomResult;
   }
 
-  if (!hasTurnRelayConfigured()) {
-    callSession.call_state = "failed";
-    callSession.ended_at = Date.now();
-    setCallStatus("Could not connect", "bad");
-    showToast("Relay unavailable", "warning");
-    return;
+  const directPeer = senderPeer && senderPeer.publicWire ?
+    senderPeer :
+    state.directPeers.get((fromUsername || "").toLowerCase()) || null;
+
+  if (!directPeer || !directPeer.publicWire) {
+    throw new Error("call invite direct key unavailable");
   }
 
-  callSession.call_state = "connecting_relay";
-  callSession.relay_started_at = Date.now();
-  setCallStatus("Connecting securely...", "warn");
-  showToast("Trying relayed connection", "info");
+  const key = await deriveDirectKey(directPeer.publicWire);
+  const payload = await decryptJson(key, encryptedPayload);
+  validateCallInvitePayload(payload, callId, "direct");
+  return { payload, directPeer };
 }
 
 async function eventKey(callSession) {
@@ -76,4 +81,43 @@ async function eventKey(callSession) {
 
 async function encryptCallEventPayload(callSession, value) {
   return encryptJson(await eventKey(callSession), value);
+}
+
+async function tryDecryptCurrentRoomInvite(callId, encryptedPayload) {
+  if (!state.roomKeys || !state.roomKeys.signal) {
+    return null;
+  }
+
+  try {
+    const payload = await decryptJson(state.roomKeys.signal, encryptedPayload);
+    validateCallInvitePayload(payload, callId, "room");
+    return { payload, directPeer: null };
+  } catch {
+    return null;
+  }
+}
+
+function validateCallInvitePayload(payload, callId, expectedKind) {
+  if (!payload ||
+      payload.type !== "call_invite" ||
+      payload.call_id !== callId ||
+      (payload.call_kind !== "direct" && payload.call_kind !== "room") ||
+      (expectedKind && payload.call_kind !== expectedKind) ||
+      typeof payload.caller_username !== "string" ||
+      typeof payload.target !== "string" ||
+      typeof payload.at !== "number") {
+    throw new Error("invalid call invite payload");
+  }
+
+  if (payload.call_kind === "direct" &&
+      payload.callee_username !== null &&
+      typeof payload.callee_username !== "string") {
+    throw new Error("invalid direct call invite payload");
+  }
+
+  if (payload.call_kind === "room" &&
+      payload.room !== null &&
+      typeof payload.room !== "string") {
+    throw new Error("invalid room call invite payload");
+  }
 }

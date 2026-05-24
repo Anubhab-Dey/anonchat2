@@ -14,21 +14,42 @@ export function setPeerCallHandler(handler) {
   peerCallHandler = handler;
 }
 
-export function rtcConfig() {
-  return {
+export function rtcConfig(options = {}) {
+  const config = {
     iceServers: getIceServers(),
     iceCandidatePoolSize: Number(appConfig.iceCandidatePoolSize || 0),
   };
+
+  if (options.relayOnly) {
+    config.iceTransportPolicy = "relay";
+  } else if (appConfig.iceTransportPolicy) {
+    config.iceTransportPolicy = appConfig.iceTransportPolicy;
+  }
+
+  return config;
 }
 
 export function ensurePeerConnection(peerId, options = {}) {
-  if (state.pcs.has(peerId)) {
-    const existing = state.pcs.get(peerId);
+  const existing = state.pcs.get(peerId);
+
+  if (existing && !options.forceNew && !(options.relayOnly && !existing._relayOnly)) {
     updatePeerConnectionMode(existing, options);
     return existing;
   }
 
-  const pc = new RTCPeerConnection(rtcConfig());
+  if (existing) {
+    closePeer(peerId);
+  }
+
+  return createPeerConnection(peerId, options);
+}
+
+export function createRelayPeerConnection(peerId, options = {}) {
+  return ensurePeerConnection(peerId, { ...options, relayOnly: true, forceNew: true });
+}
+
+function createPeerConnection(peerId, options = {}) {
+  const pc = new RTCPeerConnection(rtcConfig(options));
   pc._makingOffer = false;
   pc._ignoreOffer = false;
   pc._isSettingRemoteAnswerPending = false;
@@ -91,6 +112,8 @@ function updatePeerConnectionMode(pc, options = {}) {
   if (options.publicWire) {
     pc._directPublicWire = options.publicWire;
   }
+
+  pc._relayOnly = options.relayOnly === true || pc._relayOnly === true;
 }
 
 export async function negotiate(peerId) {
@@ -104,7 +127,10 @@ export async function negotiate(peerId) {
     pc._makingOffer = true;
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    await sendRtcSignal(peerId, { description: pc.localDescription });
+    await sendRtcSignal(peerId, {
+      description: pc.localDescription,
+      relayOnly: pc._relayOnly === true,
+    });
   } finally {
     pc._makingOffer = false;
   }
@@ -165,6 +191,14 @@ async function handleRtcSignal(peerId, pc, signal) {
   const description = signal.description || (signal.sdp ? { type: signal.type, sdp: signal.sdp } : null);
 
   if (description) {
+    if (description.type === "offer" && signal.relayOnly && !pc._relayOnly) {
+      pc = createRelayPeerConnection(peerId, {
+        kind: pc._signalKind,
+        username: pc._directUsername,
+        publicWire: pc._directPublicWire,
+      });
+    }
+
     const readyForOffer =
       !pc._makingOffer &&
       (pc.signalingState === "stable" || pc._isSettingRemoteAnswerPending);
@@ -394,7 +428,11 @@ function handlePeerConnectionState(peerId, value) {
     detectSelectedTransport(state.pcs.get(peerId)).then((transport) => {
       window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value, transport } }));
       setCallStatus("Connected", "good");
-      showToast(transport === "server_relay" ? "Connected through relay" : "Connected directly", "success");
+      if (transport === "server_relay") {
+        showToast("Connected through relay", "success");
+      } else if (transport === "p2p") {
+        showToast("Connected directly", "success");
+      }
     });
   } else if (value === "failed") {
     window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value } }));
@@ -412,7 +450,7 @@ function handlePeerConnectionState(peerId, value) {
 
 async function detectSelectedTransport(pc) {
   if (!pc || !pc.getStats) {
-    return "p2p";
+    return null;
   }
 
   try {
@@ -426,7 +464,7 @@ async function detectSelectedTransport(pc) {
     });
 
     if (!pair) {
-      return "p2p";
+      return null;
     }
 
     const local = stats.get(pair.localCandidateId);
@@ -434,6 +472,6 @@ async function detectSelectedTransport(pc) {
     return (local && local.candidateType === "relay") ||
       (remote && remote.candidateType === "relay") ? "server_relay" : "p2p";
   } catch {
-    return "p2p";
+    return null;
   }
 }

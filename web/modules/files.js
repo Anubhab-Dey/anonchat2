@@ -7,6 +7,8 @@ import { ensurePeerConnection, negotiate, peerLabel, renderPeers } from "./call-
 import { persistMessage } from "./conversations.js";
 
 const CHUNK_SIZE = 12000;
+let hashSelfCheckPromise = null;
+let hashWarningShown = false;
 
 export function setupDataChannel(peerId, channel) {
   channel.bufferedAmountLowThreshold = 512 * 1024;
@@ -53,6 +55,10 @@ export async function sendSelectedFile() {
 
   if (!state.roomKeys || !state.roomKeys.file) {
     showToast("Enter a room before sending files", "warning");
+    return;
+  }
+
+  if (!(await ensureFileHashingAvailable())) {
     return;
   }
 
@@ -165,6 +171,12 @@ async function handleDataMessage(peerId, raw) {
     return;
   }
 
+  if (!(await ensureFileHashingAvailable())) {
+    addSystemMessage(`file verification unavailable: ${transfer.name}`);
+    state.incomingFiles.delete(msg.id);
+    return;
+  }
+
   const blob = new Blob(transfer.chunks, { type: transfer.type });
   const hash = await sha256Blob(blob);
 
@@ -256,6 +268,10 @@ async function persistFileMessage(metadata) {
 }
 
 async function sha256File(file) {
+  if (!(await ensureFileHashingAvailable())) {
+    throw new Error("file hashing unavailable");
+  }
+
   const hasher = new Sha256Incremental();
 
   for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
@@ -267,6 +283,10 @@ async function sha256File(file) {
 }
 
 async function sha256Blob(blob) {
+  if (!(await ensureFileHashingAvailable())) {
+    throw new Error("file hashing unavailable");
+  }
+
   const hasher = new Sha256Incremental();
 
   for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
@@ -292,6 +312,76 @@ function waitForChannel(channel) {
     channel.addEventListener("open", done);
     channel.addEventListener("bufferedamountlow", done);
   });
+}
+
+async function ensureFileHashingAvailable() {
+  if (!hashSelfCheckPromise) {
+    hashSelfCheckPromise = runSha256SelfCheck().then(
+      () => true,
+      () => false
+    );
+  }
+
+  const ok = await hashSelfCheckPromise;
+
+  if (!ok && !hashWarningShown) {
+    hashWarningShown = true;
+    showToast("File hashing unavailable", "error");
+  }
+
+  return ok;
+}
+
+async function runSha256SelfCheck() {
+  const empty = new Uint8Array();
+  const abc = new TextEncoder().encode("abc");
+
+  assertHash(
+    empty,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  );
+  assertHash(
+    abc,
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  );
+
+  if (!window.crypto || !crypto.subtle) {
+    throw new Error("WebCrypto unavailable for hash self-check");
+  }
+
+  const boundary = new Uint8Array(257);
+
+  for (let index = 0; index < boundary.length; index++) {
+    boundary[index] = (index * 31 + 7) & 0xff;
+  }
+
+  const hasher = new Sha256Incremental();
+  hasher.update(boundary.subarray(0, 1));
+  hasher.update(boundary.subarray(1, 64));
+  hasher.update(boundary.subarray(64, 65));
+  hasher.update(boundary.subarray(65, 129));
+  hasher.update(boundary.subarray(129));
+
+  const expected = bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", boundary)));
+  const actual = hasher.digestHex();
+
+  if (actual !== expected) {
+    throw new Error("sha256 boundary self-check failed");
+  }
+}
+
+function assertHash(bytes, expected) {
+  const hasher = new Sha256Incremental();
+  hasher.update(bytes);
+  const actual = hasher.digestHex();
+
+  if (actual !== expected) {
+    throw new Error("sha256 vector self-check failed");
+  }
+}
+
+function bytesToHex(bytes) {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 const SHA256_K = [

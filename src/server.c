@@ -2682,13 +2682,17 @@ static struct call_route *upsert_call_route(
 }
 
 static int send_call_event_to_user(
+    struct session_state *sender,
     const char *target_username,
     const char *event_type,
     const char *call_id,
-    const char *from_username,
     int64_t server_now,
     const char *payload
 ) {
+    if (sender == NULL) {
+        return 0;
+    }
+
     struct session_state *target = find_client_by_username(target_username);
 
     if (target == NULL || !is_active_session(target)) {
@@ -2697,12 +2701,14 @@ static int send_call_event_to_user(
 
     return send_textf(
         target,
-        "CALL_EVENT|%s|%s|%s|%lld|%s",
+        "CALL_EVENT|%s|%s|%s|%lld|%s|%s|%s",
         event_type,
         call_id,
-        from_username,
+        sender->username,
         (long long)server_now,
-        payload
+        payload,
+        sender->peer_id,
+        sender->public_key
     );
 }
 
@@ -2728,12 +2734,14 @@ static void send_call_event_to_room(
 
         (void)send_textf(
             client,
-            "CALL_EVENT|%s|%s|%s|%lld|%s",
+            "CALL_EVENT|%s|%s|%s|%lld|%s|%s|%s",
             event_type,
             call_id,
             sender->username,
             (long long)server_now,
-            payload
+            payload,
+            sender->peer_id,
+            sender->public_key
         );
     }
 }
@@ -2750,7 +2758,7 @@ static int route_call_event(
             strcmp(state->username, route->caller_username) == 0 ?
             route->target :
             route->caller_username;
-        return send_call_event_to_user(target, event_type, route->call_id, state->username, server_now, payload);
+        return send_call_event_to_user(state, target, event_type, route->call_id, server_now, payload);
     }
 
     if (strcmp(route->call_kind, "room") == 0) {
@@ -2783,6 +2791,11 @@ static void handle_call_invite(
         !valid_payload_field(payload) ||
         !((strcmp(call_kind, "direct") == 0 && valid_username(target)) ||
           (strcmp(call_kind, "room") == 0 && valid_room_name(target)))) {
+        (void)send_textf(state, "ERR|call_invite");
+        return;
+    }
+
+    if (strcmp(call_kind, "direct") == 0 && state->public_key[0] == '\0') {
         (void)send_textf(state, "ERR|call_invite");
         return;
     }
