@@ -4,7 +4,7 @@ AnonChat is a C-first, privacy-minimizing chat prototype.
 
 The server is intentionally boring: it serves the web client, keeps username/password accounts in a tiny SQLite database, relays encrypted frames to currently connected peers, and relays encrypted WebRTC signaling for peer-to-peer calls and file transfer. It does not persist messages, files, sessions, signaling payloads, or access logs.
 
-## Build
+## Build On Windows
 
 This workspace is set up for MSYS2 UCRT64 on Windows.
 
@@ -13,10 +13,35 @@ cmake --preset msys2-ucrt64-debug
 cmake --build --preset msys2-ucrt64-debug
 ```
 
-## Run
+The Windows build uses BCrypt for random bytes and password verifier derivation.
+
+## Build On Linux
+
+Install the native dependencies first. On Debian/Ubuntu-like systems:
+
+```bash
+sudo apt install build-essential cmake libwebsockets-dev libsqlite3-dev libssl-dev
+```
+
+Then build:
+
+```bash
+cmake --preset linux-debug
+cmake --build --preset linux-debug
+```
+
+The Linux build uses `getrandom` or `/dev/urandom` for random bytes and OpenSSL libcrypto for PBKDF2-SHA-256.
+
+## Run On Windows
 
 ```powershell
 .\build\anonchat.exe
+```
+
+## Run On Linux
+
+```bash
+./build-linux/anonchat
 ```
 
 Then open:

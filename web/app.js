@@ -1595,15 +1595,31 @@ function attachRemoteStream(peerId, stream) {
 }
 
 async function ensureLocalMedia() {
+  if (state.localStream) {
+    return true;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    addSystemMessage("camera and microphone prompts require HTTPS or localhost");
+    setCallStatus("media unavailable", "bad");
+    return false;
+  }
+
+  addSystemMessage("asking for camera and microphone permission");
+
   try {
-    if (!state.localStream) {
-      state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-      els.localVideo.srcObject = state.localStream;
+    state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    els.localVideo.srcObject = state.localStream;
+    return true;
+  } catch (error) {
+    if (error && (error.name === "NotAllowedError" || error.name === "PermissionDeniedError")) {
+      addSystemMessage("camera or microphone is blocked; allow it in browser site settings");
+    } else if (error && error.name === "NotFoundError") {
+      addSystemMessage("no camera or microphone was found");
+    } else {
+      addSystemMessage("camera or microphone could not be opened");
     }
 
-    return true;
-  } catch {
-    addSystemMessage("camera or microphone permission was denied");
     setCallStatus("media blocked", "bad");
     return false;
   }

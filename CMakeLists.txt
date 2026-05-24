@@ -9,18 +9,32 @@ add_executable(anonchat
     src/server.c
 )
 
-target_compile_options(anonchat PRIVATE
-    -Wall
-    -Wextra
-    -pedantic
-)
+if(MSVC)
+    target_compile_options(anonchat PRIVATE /W4)
+else()
+    target_compile_options(anonchat PRIVATE
+        -Wall
+        -Wextra
+        -pedantic
+    )
+endif()
 
 target_compile_definitions(anonchat PRIVATE
     ANONCHAT_WEB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/web"
 )
 
-target_link_libraries(anonchat PRIVATE
-    websockets
-    bcrypt
-    sqlite3
-)
+if(WIN32)
+    target_link_libraries(anonchat PRIVATE
+        websockets
+        bcrypt
+        sqlite3
+    )
+else()
+    find_package(OpenSSL REQUIRED)
+
+    target_link_libraries(anonchat PRIVATE
+        websockets
+        sqlite3
+        OpenSSL::Crypto
+    )
+endif()

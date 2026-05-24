@@ -38,6 +38,7 @@ button,
 input,
 textarea {
   font: inherit;
+  min-width: 0;
 }
 
 button {
@@ -106,9 +107,18 @@ h2 {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 320px minmax(360px, 1fr) 340px;
+  grid-template-columns:
+    minmax(260px, clamp(280px, 23vw, 360px))
+    minmax(0, 1fr)
+    minmax(260px, clamp(280px, 24vw, 360px));
   height: 100vh;
   min-height: 0;
+}
+
+@supports (height: 100dvh) {
+  .app-shell {
+    height: 100dvh;
+  }
 }
 
 .rail,
@@ -177,12 +187,15 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
 }
 
 .conversation-tools {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .conversation-tools .quiet-button {
@@ -369,6 +382,7 @@ h2 {
   gap: 16px;
   border-bottom: 1px solid var(--line);
   padding: 15px 18px;
+  min-width: 0;
 }
 
 .eyebrow {
@@ -382,6 +396,8 @@ h2 {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .messages {
@@ -460,9 +476,15 @@ a {
   }
 
   .app-shell {
-    grid-template-columns: minmax(280px, 340px) minmax(360px, 1fr);
+    grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
     height: auto;
     min-height: 100vh;
+  }
+
+  @supports (min-height: 100dvh) {
+    .app-shell {
+      min-height: 100dvh;
+    }
   }
 
   .activity {
@@ -480,6 +502,7 @@ a {
   .rail,
   .activity {
     border-width: 0 0 1px 0;
+    padding: 12px;
   }
 
   .conversation {
@@ -511,5 +534,85 @@ a {
 
   .message {
     max-width: 92%;
+  }
+}
+
+@media (max-width: 520px) {
+  button {
+    padding-inline: 10px;
+  }
+
+  .brand {
+    grid-template-columns: auto 1fr;
+  }
+
+  #connectBtn {
+    grid-column: 1 / -1;
+  }
+
+  .surface {
+    padding: 12px;
+  }
+
+  .section-head {
+    align-items: flex-start;
+    display: grid;
+  }
+
+  .conversation-tools {
+    justify-content: start;
+  }
+
+  .direct-row,
+  .invite-row {
+    grid-template-columns: 1fr;
+  }
+
+  .direct-row button,
+  .invite-row button {
+    width: 100%;
+  }
+
+  .activity,
+  .room-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .room-bar,
+  .messages,
+  .composer {
+    padding-inline: 10px;
+  }
+
+  .composer {
+    grid-template-columns: auto 1fr;
+  }
+
+  #sendBtn {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 360px) {
+  h1 {
+    font-size: 18px;
+  }
+
+  .rail,
+  .activity {
+    padding: 9px;
+  }
+
+  .message {
+    max-width: 100%;
+  }
+
+  .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .icon-button,
+  #sendBtn {
+    width: 100%;
   }
 }

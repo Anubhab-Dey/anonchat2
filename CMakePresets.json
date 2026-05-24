@@ -11,6 +11,16 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_C_COMPILER": "C:/msys64/ucrt64/bin/gcc.exe"
       }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -18,7 +28,11 @@
       "name": "msys2-ucrt64-debug",
       "displayName": "Build MSYS2 UCRT64 Debug",
       "configurePreset": "msys2-ucrt64-debug"
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Build Linux Debug",
+      "configurePreset": "linux-debug"
     }
   ]
 }
-

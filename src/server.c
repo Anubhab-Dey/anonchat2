@@ -1,8 +1,20 @@
+#ifdef _WIN32
 #define _WIN32_WINNT 0x0602
 #define WIN32_LEAN_AND_MEAN
-
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <sys/random.h>
+#endif
+#include <openssl/evp.h>
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#endif
 
 #include <libwebsockets.h>
 #include <sqlite3.h>
@@ -59,6 +71,20 @@ struct session_state {
 static volatile sig_atomic_t interrupted = 0;
 static struct session_state *clients[MAX_CLIENTS];
 static sqlite3 *account_db = NULL;
+
+static size_t bounded_strlen(const char *text, size_t max) {
+    size_t len = 0;
+
+    if (text == NULL) {
+        return 0;
+    }
+
+    while (len < max && text[len] != '\0') {
+        ++len;
+    }
+
+    return len;
+}
 
 static void handle_signal(int signal_number) {
     (void)signal_number;
@@ -153,6 +179,7 @@ static int fill_random_bytes(unsigned char *buffer, size_t len) {
         return 0;
     }
 
+#ifdef _WIN32
     NTSTATUS status = BCryptGenRandom(
         NULL,
         buffer,
@@ -161,6 +188,49 @@ static int fill_random_bytes(unsigned char *buffer, size_t len) {
     );
 
     return status == 0;
+#else
+    size_t filled = 0;
+
+    while (filled < len) {
+#if defined(__linux__)
+        ssize_t got = getrandom(buffer + filled, len - filled, 0);
+
+        if (got < 0 && errno == EINTR) {
+            continue;
+        }
+
+        if (got > 0) {
+            filled += (size_t)got;
+            continue;
+        }
+#endif
+
+        int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0) {
+            return 0;
+        }
+
+        while (filled < len) {
+            ssize_t got = read(fd, buffer + filled, len - filled);
+
+            if (got < 0 && errno == EINTR) {
+                continue;
+            }
+
+            if (got <= 0) {
+                close(fd);
+                return 0;
+            }
+
+            filled += (size_t)got;
+        }
+
+        close(fd);
+    }
+
+    return 1;
+#endif
 }
 
 static void encode_hex(
@@ -215,6 +285,7 @@ static int hash_password_field(
 
     memset(out_hash, 0, PASSWORD_HASH_BYTES);
 
+#ifdef _WIN32
     BCRYPT_ALG_HANDLE algorithm = NULL;
     NTSTATUS status = BCryptOpenAlgorithmProvider(
         &algorithm,
@@ -227,7 +298,7 @@ static int hash_password_field(
         return 0;
     }
 
-    size_t password_len = strnlen(password_field, PASSWORD_FIELD_MAX + 1);
+    size_t password_len = bounded_strlen(password_field, PASSWORD_FIELD_MAX + 1);
 
     status = BCryptDeriveKeyPBKDF2(
         algorithm,
@@ -249,6 +320,31 @@ static int hash_password_field(
     }
 
     return 1;
+#else
+    size_t password_len = bounded_strlen(password_field, PASSWORD_FIELD_MAX + 1);
+
+    if (password_len > PASSWORD_FIELD_MAX) {
+        return 0;
+    }
+
+    int ok = PKCS5_PBKDF2_HMAC(
+        password_field,
+        (int)password_len,
+        salt,
+        PASSWORD_SALT_BYTES,
+        PASSWORD_PBKDF2_ITERATIONS,
+        EVP_sha256(),
+        PASSWORD_HASH_BYTES,
+        out_hash
+    );
+
+    if (ok != 1) {
+        memset(out_hash, 0, PASSWORD_HASH_BYTES);
+        return 0;
+    }
+
+    return 1;
+#endif
 }
 
 static int text_has_len_between(const char *text, size_t min, size_t max) {
@@ -256,7 +352,7 @@ static int text_has_len_between(const char *text, size_t min, size_t max) {
         return 0;
     }
 
-    size_t len = strnlen(text, max + 1);
+    size_t len = bounded_strlen(text, max + 1);
     return len >= min && len <= max;
 }
 
@@ -521,7 +617,7 @@ static int enqueue_text(struct session_state *state, const char *text) {
         return 0;
     }
 
-    size_t len = strnlen(text, MAX_FRAME_BYTES);
+    size_t len = bounded_strlen(text, MAX_FRAME_BYTES);
 
     if (len == 0 || len >= MAX_FRAME_BYTES) {
         state->closing = 1;
