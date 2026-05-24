@@ -14,7 +14,7 @@ import {
   peerLabel,
   setPeerCallHandler,
 } from "./call-p2p.js";
-import { startRelayFallback } from "./call-relay.js";
+import { markTurnFallback, sendCallInvite, sendCallEnd } from "./call-relay.js";
 
 const P2P_TIMEOUT_MS = 10000;
 
@@ -23,7 +23,7 @@ export function initializeCalls() {
     setCallStatus("Call failed", "bad");
   }));
   window.addEventListener("anonchat:p2p-state", (event) => {
-    handleP2PState(event.detail.peerId, event.detail.state);
+    handleP2PState(event.detail.peerId, event.detail.state, event.detail.transport);
   });
 }
 
@@ -146,12 +146,11 @@ export async function startP2PAttempt(callSession, roomPeerIds = null) {
   clearTimeout(callSession.fallbackTimer);
   callSession.fallbackTimer = setTimeout(() => {
     if (!callSession.selected_transport && callSession.call_state === "connecting_p2p") {
-      startRelayFallback(callSession).catch(() => {
-        callSession.call_state = "failed";
-        setCallStatus("Call failed", "bad");
-      });
+      markTurnFallback(callSession);
     }
   }, P2P_TIMEOUT_MS);
+
+  await sendCallInvite(callSession).catch(() => {});
 
   if (callSession.call_kind === "direct") {
     const pc = ensurePeerConnection(callSession.peerId, {
@@ -202,13 +201,14 @@ export function endCallSession(callSession = state.calls.active) {
   clearTimeout(callSession.fallbackTimer);
   callSession.call_state = "ended";
   callSession.ended_at = Date.now();
+  sendCallEnd(callSession).catch(() => {});
   stopP2PMedia();
   state.calls.active = null;
   setCallStatus("idle");
   addSystemMessage("call ended");
 }
 
-function handleP2PState(peerId, value) {
+function handleP2PState(peerId, value, transport = "p2p") {
   const callSession = state.calls.active;
 
   if (!callSession || callSession.selected_transport === "server_relay") {
@@ -216,7 +216,7 @@ function handleP2PState(peerId, value) {
   }
 
   if (value === "connected" || value === "completed") {
-    selectCallTransport(callSession, "p2p");
+    selectCallTransport(callSession, transport === "server_relay" ? "server_relay" : "p2p");
     return;
   }
 
@@ -225,7 +225,7 @@ function handleP2PState(peerId, value) {
     setCallStatus("Reconnecting...", "warn");
     setTimeout(() => {
       if (!callSession.selected_transport) {
-        startRelayFallback(callSession).catch(() => setCallStatus("Call failed", "bad"));
+        markTurnFallback(callSession);
       }
     }, 1000);
   }

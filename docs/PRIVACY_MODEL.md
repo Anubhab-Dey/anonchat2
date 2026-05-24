@@ -31,14 +31,19 @@ All runtime connection state disappears when the server stops.
 
 ## Account Database
 
-The SQLite database persists only:
+The SQLite database persists:
 
 - Username.
 - Password salt.
 - Password verifier.
 - Account creation time.
+- One active device/session record per account.
+- Hashed session tokens, never raw tokens.
+- Short-lived session challenge nonces.
+- Encrypted backup ciphertext.
+- Opaque call/session/push event metadata needed for state and future ringer support.
 
-It does not contain room names, messages, files, WebRTC offers/answers, IP addresses, or session tokens.
+It does not contain plaintext room keys, messages, files, WebRTC offers/answers, IP addresses, raw session tokens, backup plaintext, or decrypted push endpoints.
 
 When WebCrypto is available, the browser first derives a password proof with PBKDF2-SHA-256 using a username-scoped salt, and the server stores a verifier of that proof. This prevents the server from receiving the raw password in normal HTTPS/localhost use. The proof is still password-equivalent for this app, so TLS and server integrity still matter.
 
@@ -71,7 +76,19 @@ WebRTC offers, answers, and ICE candidates are encrypted in the browser with the
 
 Direct username messages and direct username calls are routed only to currently online users. Each client publishes a browser-generated ECDH public key after login. Senders fetch the recipient's current public key, derive an AES-GCM key in the browser, and send only encrypted direct-message or direct-call signaling payloads through the server.
 
-This hides message contents and WebRTC call setup from the relay, but the relay still sees usernames, delivery timing, payload sizes, and who is messaging whom. A fully malicious server can still interfere with public-key lookup, so this is best-effort E2EE rather than a complete authenticated key-transparency system.
+This hides message contents and WebRTC call setup from the relay, but the relay still sees usernames, delivery timing, payload sizes, and who is messaging whom. A fully malicious server can still interfere with public-key lookup, so this is best-effort E2EE rather than a complete authenticated key-transparency system. The direct-message ECDH identity is separate from the device signing key used for session refresh challenges.
+
+## Session Refresh
+
+Each browser/PWA install has a separate ECDSA P-256 device signing key. The server stores only the public key. Session refresh uses a short-lived server nonce and requires a valid ECDSA signature over the session id and nonce before the server rotates the session token.
+
+The device signing key is not reused for direct messages. Direct messages keep using a separate ECDH keypair.
+
+## Encrypted Backups
+
+Automatic conversation carryover uses an encrypted backup. The browser derives a backup key from the password and lowercase username, stores that derived backup key only on the trusted active device, and uploads only AES-GCM ciphertext to the server.
+
+If the local backup key is missing after reload/session refresh, the app keeps local data, marks backup sync locked, and requires signing in again with the password before restore/upload can continue. Files bytes are excluded from backups; only file-message metadata can be included.
 
 ## Local History
 
@@ -87,11 +104,11 @@ This is not remote push delivery while the app is fully closed. True Web Push wo
 
 ## Calls And Files
 
-Audio and video use peer-to-peer WebRTC media, which browsers protect with DTLS-SRTP. The C server does not receive media packets. Full application-level encoded-frame E2EE is not enabled here because browser support is uneven and unsafe homegrown media transforms can make confidentiality worse.
+Audio and video use WebRTC media, which browsers protect with DTLS-SRTP. The preferred path is direct P2P. When trusted/self-hosted TURN is configured, ICE can fall back to relayed candidates automatically; the TURN server relays encrypted WebRTC packets and does not decrypt media. The C app server does not receive raw media packets and does not implement custom audio/video frame relaying.
 
 Files are transferred over WebRTC data channels. File metadata and chunks are additionally encrypted in the browser with the room file key, then checked with SHA-256 after download. The sender's browser keeps the file only long enough to transfer it; the server never stores file bytes.
 
-By default, the browser is configured with no public STUN/TURN servers in `web/config.js`. That is more private, but peer-to-peer connections may fail across NATs. Adding public STUN/TURN improves connectivity but shares metadata with that provider.
+By default, the browser is configured with no public STUN/TURN servers in `web/config.js`. That is more private, but peer-to-peer connections may fail across NATs. For worldwide deployment, configure first-party STUN/TURN there or serve equivalent app config from deployment tooling. TURN improves connectivity but exposes metadata such as participant IPs, timing, and packet sizes to the TURN operator.
 
 ## Deployment Rules
 

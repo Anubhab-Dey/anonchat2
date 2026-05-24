@@ -50,7 +50,7 @@ import {
   handleSignal,
   handleDirectSignal,
 } from "./modules/call-p2p.js";
-import { handleCallEvent, handleRelayFrame } from "./modules/call-relay.js";
+import { handleCallEvent } from "./modules/call-relay.js";
 import { sendSelectedFile, updateSelectedFile } from "./modules/files.js";
 import {
   loadNotificationSetting,
@@ -203,9 +203,6 @@ function bindProtocol() {
   });
   onWire("CALL_EVENT", (parts) => {
     handleCallEvent(parts).catch(() => {});
-  });
-  onWire("CALL_RELAY", (parts) => {
-    handleRelayFrame(parts).catch(() => {});
   });
 }
 

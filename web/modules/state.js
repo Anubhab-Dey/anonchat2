@@ -19,6 +19,7 @@ export const state = {
   localStream: null,
   incomingFiles: new Map(),
   db: null,
+  deviceIdentity: null,
   identity: null,
   directPeers: new Map(),
   directPeerIds: new Map(),
@@ -32,6 +33,8 @@ export const state = {
   backupTimer: null,
   backupBusy: false,
   backupDirty: false,
+  backupLocked: false,
+  backupKey: null,
   blockingReason: "",
   session: {
     deviceId: "",

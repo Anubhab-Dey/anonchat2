@@ -1,6 +1,6 @@
 import { state, clearSessionOnly } from "./state.js";
 import { dbGet, dbPut, deleteLocalData } from "./local-db.js";
-import { textToBase64Url, randomKey, base64UrlToText } from "./crypto-box.js";
+import { enc, textToBase64Url, bytesToBase64Url, base64UrlToText } from "./crypto-box.js";
 import { sendAndWait, sendWire, stopReconnect, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { showBlockingScreen, hideBlockingScreen, setIdentity } from "./ui.js";
@@ -8,14 +8,15 @@ import { showBlockingScreen, hideBlockingScreen, setIdentity } from "./ui.js";
 export async function ensureDeviceIdentity() {
   let saved = await dbGet("settings", "device_identity");
 
-  if (!saved) {
+  if (!saved || saved.kind !== "session-signing-v1") {
     const keyPair = await crypto.subtle.generateKey(
-      { name: "ECDH", namedCurve: "P-256" },
+      { name: "ECDSA", namedCurve: "P-256" },
       true,
-      ["deriveKey"]
+      ["sign", "verify"]
     );
     saved = {
       key: "device_identity",
+      kind: "session-signing-v1",
       publicJwk: await crypto.subtle.exportKey("jwk", keyPair.publicKey),
       privateJwk: await crypto.subtle.exportKey("jwk", keyPair.privateKey),
       label: deviceLabel(),
@@ -23,14 +24,14 @@ export async function ensureDeviceIdentity() {
     await dbPut("settings", saved);
   }
 
-  const publicKey = await crypto.subtle.importKey("jwk", saved.publicJwk, { name: "ECDH", namedCurve: "P-256" }, true, []);
-  const privateKey = await crypto.subtle.importKey("jwk", saved.privateJwk, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveKey"]);
-  state.identity = {
+  const publicKey = await crypto.subtle.importKey("jwk", saved.publicJwk, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
+  const privateKey = await crypto.subtle.importKey("jwk", saved.privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  state.deviceIdentity = {
     keyPair: { publicKey, privateKey },
     publicWire: textToBase64Url(JSON.stringify(saved.publicJwk)),
     label: saved.label || deviceLabel(),
   };
-  return state.identity;
+  return state.deviceIdentity;
 }
 
 export async function sendHello() {
@@ -97,17 +98,29 @@ export async function refreshSession() {
     return false;
   }
 
-  const nonceSignature = randomKey(18);
-
   try {
     await sendHello();
+    sendWire(`SESSION_CHALLENGE|${state.session.sessionId}`);
+    const nonceReply = await waitForWire(
+      (candidate) =>
+        (candidate[0] === "SESSION_NONCE" && candidate[1] === state.session.sessionId) ||
+        (candidate[0] === "ERR" && candidate[1] === "session_challenge"),
+      8000
+    );
+
+    if (nonceReply.parts[0] !== "SESSION_NONCE") {
+      throw new Error("challenge rejected");
+    }
+
+    const nonce = nonceReply.parts[2];
+    const nonceSignature = await signSessionNonce(state.session.sessionId, nonce);
     const wait = waitForWire(
       (candidate) =>
         (candidate[0] === "OK" && candidate[1] === "session_refresh") ||
         (candidate[0] === "ERR" && candidate[1] === "session_refresh"),
       8000
     );
-    sendWire(`SESSION_REFRESH|${state.session.sessionId}|${state.session.sessionToken}|${nonceSignature}`);
+    sendWire(`SESSION_REFRESH|${state.session.sessionId}|${state.session.sessionToken}|${nonce}|${nonceSignature}`);
     const { parts } = await wait;
 
     if (parts[0] !== "OK") {
@@ -136,6 +149,16 @@ export async function refreshSession() {
     showToast("Session expired", "warning");
     return false;
   }
+}
+
+async function signSessionNonce(sessionId, nonce) {
+  const identity = await ensureDeviceIdentity();
+  const signature = new Uint8Array(await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    identity.keyPair.privateKey,
+    enc.encode(`${sessionId}|${nonce}`)
+  ));
+  return bytesToBase64Url(signature);
 }
 
 export async function handleSessionReplaced(newDeviceId) {

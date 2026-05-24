@@ -11,6 +11,10 @@
 #include <sys/random.h>
 #endif
 #include <openssl/evp.h>
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/obj_mac.h>
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
 #endif
@@ -46,6 +50,7 @@
 #define MAX_FRAME_BYTES 262144
 #define OUTBOX_SIZE 16
 #define CALL_SLOTS 128
+#define SESSION_NONCE_TTL_SECONDS 300
 
 #define PEER_ID_BYTES 8
 #define PEER_ID_TEXT_BYTES ((PEER_ID_BYTES * 2) + 1)
@@ -250,6 +255,18 @@ static int db_open(void) {
             ");"
         ) ||
         !db_exec(
+            "CREATE TABLE IF NOT EXISTS session_nonces ("
+            "    nonce TEXT PRIMARY KEY,"
+            "    session_id TEXT NOT NULL,"
+            "    device_id TEXT NOT NULL,"
+            "    created_at INTEGER NOT NULL,"
+            "    expires_at INTEGER NOT NULL,"
+            "    used_at INTEGER NULL,"
+            "    FOREIGN KEY(session_id) REFERENCES sessions(session_id),"
+            "    FOREIGN KEY(device_id) REFERENCES devices(device_id)"
+            ");"
+        ) ||
+        !db_exec(
             "CREATE TABLE IF NOT EXISTS call_events ("
             "    event_id TEXT PRIMARY KEY,"
             "    call_id TEXT NOT NULL,"
@@ -278,6 +295,7 @@ static int db_open(void) {
         !db_exec("CREATE INDEX IF NOT EXISTS idx_devices_username ON devices(username);") ||
         !db_exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_username_key ON devices(username, device_public_key);") ||
         !db_exec("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(username, revoked_at, expires_at);") ||
+        !db_exec("CREATE INDEX IF NOT EXISTS idx_session_nonces_session ON session_nonces(session_id, expires_at, used_at);") ||
         !db_exec("CREATE INDEX IF NOT EXISTS idx_push_username_device ON push_subscriptions(username, device_id, revoked_at);")) {
         sqlite3_close(account_db);
         account_db = NULL;
@@ -490,6 +508,384 @@ static int constant_time_equal(
     }
 
     return diff == 0;
+}
+
+static int base64url_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return c - 'A';
+    }
+
+    if (c >= 'a' && c <= 'z') {
+        return c - 'a' + 26;
+    }
+
+    if (c >= '0' && c <= '9') {
+        return c - '0' + 52;
+    }
+
+    if (c == '-' || c == '+') {
+        return 62;
+    }
+
+    if (c == '_' || c == '/') {
+        return 63;
+    }
+
+    return -1;
+}
+
+static int base64url_decode(
+    const char *text,
+    unsigned char *out,
+    size_t out_cap,
+    size_t *out_len
+) {
+    if (text == NULL || out == NULL || out_len == NULL) {
+        return 0;
+    }
+
+    unsigned int accumulator = 0;
+    int bits = 0;
+    size_t written = 0;
+
+    for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; ++p) {
+        if (*p == '=') {
+            break;
+        }
+
+        int value = base64url_value(*p);
+
+        if (value < 0) {
+            return 0;
+        }
+
+        accumulator = (accumulator << 6) | (unsigned int)value;
+        bits += 6;
+
+        if (bits >= 8) {
+            bits -= 8;
+
+            if (written >= out_cap) {
+                return 0;
+            }
+
+            out[written++] = (unsigned char)((accumulator >> bits) & 0xff);
+        }
+    }
+
+    *out_len = written;
+    return 1;
+}
+
+static int json_string_field(
+    const char *json,
+    const char *field,
+    char *out,
+    size_t out_size
+) {
+    if (json == NULL || field == NULL || out == NULL || out_size == 0) {
+        return 0;
+    }
+
+    char needle[32];
+    int needle_len = snprintf(needle, sizeof(needle), "\"%s\"", field);
+
+    if (needle_len <= 0 || (size_t)needle_len >= sizeof(needle)) {
+        return 0;
+    }
+
+    const char *p = strstr(json, needle);
+
+    if (p == NULL) {
+        return 0;
+    }
+
+    p += needle_len;
+
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        ++p;
+    }
+
+    if (*p != ':') {
+        return 0;
+    }
+
+    ++p;
+
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        ++p;
+    }
+
+    if (*p != '"') {
+        return 0;
+    }
+
+    ++p;
+    size_t copied = 0;
+
+    while (*p != '\0' && *p != '"') {
+        if (*p == '\\' || copied + 1 >= out_size) {
+            return 0;
+        }
+
+        out[copied++] = *p++;
+    }
+
+    if (*p != '"') {
+        return 0;
+    }
+
+    out[copied] = '\0';
+    return copied > 0;
+}
+
+static int decode_device_public_key(
+    const char *device_public_key,
+    unsigned char out_x[32],
+    unsigned char out_y[32]
+) {
+    unsigned char json_bytes[PUBLIC_KEY_MAX + 1];
+    size_t json_len = 0;
+    char x_text[96];
+    char y_text[96];
+    size_t x_len = 0;
+    size_t y_len = 0;
+    int ok = 0;
+
+    memset(json_bytes, 0, sizeof(json_bytes));
+    memset(x_text, 0, sizeof(x_text));
+    memset(y_text, 0, sizeof(y_text));
+    memset(out_x, 0, 32);
+    memset(out_y, 0, 32);
+
+    if (!base64url_decode(device_public_key, json_bytes, sizeof(json_bytes) - 1, &json_len)) {
+        goto cleanup;
+    }
+
+    json_bytes[json_len] = '\0';
+
+    if (!json_string_field((const char *)json_bytes, "x", x_text, sizeof(x_text)) ||
+        !json_string_field((const char *)json_bytes, "y", y_text, sizeof(y_text)) ||
+        !base64url_decode(x_text, out_x, 32, &x_len) ||
+        !base64url_decode(y_text, out_y, 32, &y_len) ||
+        x_len != 32 ||
+        y_len != 32) {
+        goto cleanup;
+    }
+
+    ok = 1;
+
+cleanup:
+    secure_clear(json_bytes, sizeof(json_bytes));
+    secure_clear(x_text, sizeof(x_text));
+    secure_clear(y_text, sizeof(y_text));
+    return ok;
+}
+
+static int der_signature_to_raw(
+    const unsigned char *signature,
+    size_t signature_len,
+    unsigned char out_raw[64]
+) {
+    if (signature == NULL || out_raw == NULL || signature_len < 8 || signature[0] != 0x30) {
+        return 0;
+    }
+
+    size_t pos = 2;
+
+    if (signature[1] & 0x80) {
+        size_t length_bytes = signature[1] & 0x7f;
+
+        if (length_bytes == 0 || length_bytes > 2 || 2 + length_bytes >= signature_len) {
+            return 0;
+        }
+
+        pos = 2 + length_bytes;
+    }
+
+    if (pos >= signature_len || signature[pos++] != 0x02 || pos >= signature_len) {
+        return 0;
+    }
+
+    size_t r_len = signature[pos++];
+
+    if (r_len == 0 || pos + r_len >= signature_len) {
+        return 0;
+    }
+
+    const unsigned char *r = signature + pos;
+    pos += r_len;
+
+    if (pos >= signature_len || signature[pos++] != 0x02 || pos >= signature_len) {
+        return 0;
+    }
+
+    size_t s_len = signature[pos++];
+
+    if (s_len == 0 || pos + s_len > signature_len) {
+        return 0;
+    }
+
+    const unsigned char *s = signature + pos;
+
+    while (r_len > 32 && *r == 0) {
+        ++r;
+        --r_len;
+    }
+
+    while (s_len > 32 && *s == 0) {
+        ++s;
+        --s_len;
+    }
+
+    if (r_len > 32 || s_len > 32) {
+        return 0;
+    }
+
+    memset(out_raw, 0, 64);
+    memcpy(out_raw + (32 - r_len), r, r_len);
+    memcpy(out_raw + 32 + (32 - s_len), s, s_len);
+    return 1;
+}
+
+static int normalize_ecdsa_signature(
+    const char *signature_text,
+    unsigned char out_raw[64]
+) {
+    unsigned char signature[160];
+    size_t signature_len = 0;
+    int ok = 0;
+
+    memset(signature, 0, sizeof(signature));
+    memset(out_raw, 0, 64);
+
+    if (!base64url_decode(signature_text, signature, sizeof(signature), &signature_len)) {
+        goto cleanup;
+    }
+
+    if (signature_len == 64) {
+        memcpy(out_raw, signature, 64);
+        ok = 1;
+    } else if (der_signature_to_raw(signature, signature_len, out_raw)) {
+        ok = 1;
+    }
+
+cleanup:
+    secure_clear(signature, sizeof(signature));
+    return ok;
+}
+
+static int verify_ecdsa_p256_signature(
+    const unsigned char public_x[32],
+    const unsigned char public_y[32],
+    const unsigned char digest[32],
+    const unsigned char signature_raw[64]
+) {
+#ifdef _WIN32
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_KEY_HANDLE key = NULL;
+    unsigned char blob[sizeof(BCRYPT_ECCKEY_BLOB) + 64];
+    BCRYPT_ECCKEY_BLOB *header = (BCRYPT_ECCKEY_BLOB *)blob;
+    int ok = 0;
+
+    memset(blob, 0, sizeof(blob));
+    header->dwMagic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC;
+    header->cbKey = 32;
+    memcpy(blob + sizeof(BCRYPT_ECCKEY_BLOB), public_x, 32);
+    memcpy(blob + sizeof(BCRYPT_ECCKEY_BLOB) + 32, public_y, 32);
+
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0) == 0 &&
+        BCryptImportKeyPair(
+            algorithm,
+            NULL,
+            BCRYPT_ECCPUBLIC_BLOB,
+            &key,
+            blob,
+            (ULONG)sizeof(blob),
+            0
+        ) == 0 &&
+        BCryptVerifySignature(
+            key,
+            NULL,
+            (PUCHAR)digest,
+            32,
+            (PUCHAR)signature_raw,
+            64,
+            0
+        ) == 0) {
+        ok = 1;
+    }
+
+    if (key != NULL) {
+        BCryptDestroyKey(key);
+    }
+
+    if (algorithm != NULL) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+    }
+
+    secure_clear(blob, sizeof(blob));
+    return ok;
+#else
+    EC_KEY *key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    BIGNUM *x = NULL;
+    BIGNUM *y = NULL;
+    ECDSA_SIG *signature = NULL;
+    BIGNUM *r = NULL;
+    BIGNUM *s = NULL;
+    int ok = 0;
+
+    if (key == NULL) {
+        goto cleanup;
+    }
+
+    x = BN_bin2bn(public_x, 32, NULL);
+    y = BN_bin2bn(public_y, 32, NULL);
+    r = BN_bin2bn(signature_raw, 32, NULL);
+    s = BN_bin2bn(signature_raw + 32, 32, NULL);
+    signature = ECDSA_SIG_new();
+
+    if (x == NULL ||
+        y == NULL ||
+        r == NULL ||
+        s == NULL ||
+        signature == NULL ||
+        EC_KEY_set_public_key_affine_coordinates(key, x, y) != 1 ||
+        ECDSA_SIG_set0(signature, r, s) != 1) {
+        goto cleanup;
+    }
+
+    r = NULL;
+    s = NULL;
+    ok = ECDSA_do_verify(digest, 32, signature, key) == 1;
+
+cleanup:
+    if (signature != NULL) {
+        ECDSA_SIG_free(signature);
+    }
+
+    if (r != NULL) {
+        BN_clear_free(r);
+    }
+
+    if (s != NULL) {
+        BN_clear_free(s);
+    }
+
+    if (x != NULL) {
+        BN_clear_free(x);
+    }
+
+    if (y != NULL) {
+        BN_clear_free(y);
+    }
+
+    if (key != NULL) {
+        EC_KEY_free(key);
+    }
+
+    return ok;
+#endif
 }
 
 static int hash_password_field(
@@ -1371,11 +1767,155 @@ static int require_active_session(struct session_state *state) {
 
 static int verify_device_signature(
     const char *device_public_key,
+    const char *session_id,
     const char *nonce,
     const char *nonce_signature
 ) {
-    (void)device_public_key;
-    return nonce != NULL && nonce_signature != NULL && nonce[0] != '\0' && nonce_signature[0] != '\0';
+    unsigned char public_x[32];
+    unsigned char public_y[32];
+    unsigned char signature_raw[64];
+    unsigned char digest[32];
+    char signed_text[(ID_MAX * 2) + 4];
+    int ok = 0;
+
+    memset(public_x, 0, sizeof(public_x));
+    memset(public_y, 0, sizeof(public_y));
+    memset(signature_raw, 0, sizeof(signature_raw));
+    memset(digest, 0, sizeof(digest));
+    memset(signed_text, 0, sizeof(signed_text));
+
+    int written = snprintf(signed_text, sizeof(signed_text), "%s|%s", session_id, nonce);
+
+    if (device_public_key == NULL ||
+        session_id == NULL ||
+        nonce == NULL ||
+        nonce_signature == NULL ||
+        nonce[0] == '\0' ||
+        nonce_signature[0] == '\0' ||
+        written <= 0 ||
+        (size_t)written >= sizeof(signed_text) ||
+        !decode_device_public_key(device_public_key, public_x, public_y) ||
+        !normalize_ecdsa_signature(nonce_signature, signature_raw) ||
+        !sha256_bytes((const unsigned char *)signed_text, (size_t)written, digest)) {
+        goto cleanup;
+    }
+
+    ok = verify_ecdsa_p256_signature(public_x, public_y, digest, signature_raw);
+
+cleanup:
+    secure_clear(public_x, sizeof(public_x));
+    secure_clear(public_y, sizeof(public_y));
+    secure_clear(signature_raw, sizeof(signature_raw));
+    secure_clear(digest, sizeof(digest));
+    secure_clear(signed_text, sizeof(signed_text));
+    return ok;
+}
+
+static void handle_session_challenge(
+    struct session_state *state,
+    char *cursor
+) {
+    char *session_id = next_field(&cursor);
+    char nonce[ID_MAX + 1];
+    char db_device_id[ID_MAX + 1];
+    int64_t now = now_unix();
+    sqlite3_stmt *statement = NULL;
+    int ok = 0;
+
+    memset(nonce, 0, sizeof(nonce));
+    memset(db_device_id, 0, sizeof(db_device_id));
+
+    if (state == NULL ||
+        !state->hello_seen ||
+        session_id == NULL ||
+        cursor != NULL ||
+        !valid_id_field(session_id) ||
+        !valid_public_key_field(state->pending_device_public_key) ||
+        !generate_random_id("nonce_", nonce, sizeof(nonce))) {
+        goto cleanup;
+    }
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "DELETE FROM session_nonces WHERE expires_at <= ?1 OR used_at IS NOT NULL;",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK &&
+        sqlite3_bind_int64(statement, 1, now) == SQLITE_OK) {
+        (void)sqlite3_step(statement);
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+        statement = NULL;
+    }
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT s.device_id "
+            "FROM sessions s JOIN devices d ON d.device_id = s.device_id "
+            "WHERE s.session_id = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2 "
+            "AND d.device_public_key = ?3;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 2, now) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, state->pending_device_public_key, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_ROW) {
+        goto cleanup;
+    }
+
+    const unsigned char *device_id_text = sqlite3_column_text(statement, 0);
+
+    if (device_id_text == NULL) {
+        goto cleanup;
+    }
+
+    memcpy(db_device_id, device_id_text, bounded_strlen((const char *)device_id_text, ID_MAX) + 1);
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "INSERT OR REPLACE INTO session_nonces "
+            "(nonce, session_id, device_id, created_at, expires_at, used_at) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, NULL);",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, nonce, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, db_device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 4, now) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 5, now + SESSION_NONCE_TTL_SECONDS) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_DONE) {
+        goto cleanup;
+    }
+
+    (void)send_textf(
+        state,
+        "SESSION_NONCE|%s|%s|%lld",
+        session_id,
+        nonce,
+        (long long)now
+    );
+    ok = 1;
+
+cleanup:
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    secure_clear(nonce, sizeof(nonce));
+    secure_clear(db_device_id, sizeof(db_device_id));
+
+    if (!ok) {
+        (void)send_textf(state, "ERR|session_challenge");
+    }
 }
 
 static void handle_session_refresh(
@@ -1384,18 +1924,19 @@ static void handle_session_refresh(
 ) {
     char *session_id = next_field(&cursor);
     char *session_token = next_field(&cursor);
+    char *nonce = next_field(&cursor);
     char *nonce_signature = next_field(&cursor);
-    char nonce[ID_MAX + 1];
 
     if (session_id == NULL ||
         session_token == NULL ||
+        nonce == NULL ||
         nonce_signature == NULL ||
         cursor != NULL ||
         !valid_id_field(session_id) ||
         !valid_token_field(session_token) ||
+        !valid_id_field(nonce) ||
         state == NULL ||
-        !state->hello_seen ||
-        !generate_random_id("nonce_", nonce, sizeof(nonce))) {
+        !state->hello_seen) {
         (void)send_textf(state, "ERR|session_refresh");
         if (state != NULL) {
             state->closing = 1;
@@ -1464,12 +2005,32 @@ static void handle_session_refresh(
             strcmp(db_username, state->username) != 0 ||
             strcmp(db_device_id, state->device_id) != 0)) ||
         strcmp(db_public_key, state->pending_device_public_key) != 0 ||
-        !verify_device_signature(db_public_key, nonce, nonce_signature) ||
+        !verify_device_signature(db_public_key, session_id, nonce, nonce_signature) ||
         !constant_time_equal(candidate_hash, stored_hash, 32) ||
         !generate_random_id("tok_", new_token, sizeof(new_token)) ||
         !hash_session_token(new_token, candidate_hash)) {
         goto cleanup;
     }
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT nonce FROM session_nonces "
+            "WHERE session_id = ?1 AND device_id = ?2 AND nonce = ?3 "
+            "AND used_at IS NULL AND expires_at > ?4;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, db_device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, nonce, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 4, now) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_ROW) {
+        goto cleanup;
+    }
+
+    sqlite3_finalize(statement);
+    statement = NULL;
 
     if (sqlite3_prepare_v2(
             account_db,
@@ -1486,6 +2047,26 @@ static void handle_session_refresh(
         sqlite3_bind_text(statement, 5, db_username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_bind_text(statement, 6, db_device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_step(statement) != SQLITE_DONE) {
+        goto cleanup;
+    }
+
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "UPDATE session_nonces SET used_at = ?1 "
+            "WHERE session_id = ?2 AND device_id = ?3 AND nonce = ?4 AND used_at IS NULL;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 1, now) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, db_device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 4, nonce, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_DONE ||
+        sqlite3_changes(account_db) != 1) {
         goto cleanup;
     }
 
@@ -2252,94 +2833,6 @@ static void handle_call_event_command(
     (void)send_textf(state, "OK|%s|%s|%lld", command, call_id, (long long)server_now);
 }
 
-static void handle_call_relay(
-    struct session_state *state,
-    char *cursor
-) {
-    char *call_id = next_field(&cursor);
-    char *sequence = next_field(&cursor);
-    char *encrypted_frame = next_field(&cursor);
-    int64_t sequence_value = 0;
-
-    if (!require_active_session(state)) {
-        return;
-    }
-
-    if (call_id == NULL ||
-        sequence == NULL ||
-        encrypted_frame == NULL ||
-        cursor != NULL ||
-        !valid_id_field(call_id) ||
-        !parse_i64(sequence, &sequence_value) ||
-        !valid_payload_field(encrypted_frame)) {
-        (void)send_textf(state, "ERR|call_relay");
-        return;
-    }
-
-    struct call_route *route = find_call_route(call_id);
-    int64_t server_now = now_unix();
-
-    if (route == NULL) {
-        (void)send_textf(state, "ERR|call_relay");
-        return;
-    }
-
-    if (strcmp(route->call_kind, "direct") == 0) {
-        const char *target =
-            strcmp(state->username, route->caller_username) == 0 ?
-            route->target :
-            route->caller_username;
-        struct session_state *client = find_client_by_username(target);
-
-        if (client == NULL || !is_active_session(client)) {
-            (void)send_textf(state, "ERR|call_relay");
-            return;
-        }
-
-        (void)send_textf(
-            client,
-            "CALL_RELAY|%s|%s|%lld|%lld|%s",
-            call_id,
-            state->username,
-            (long long)sequence_value,
-            (long long)server_now,
-            encrypted_frame
-        );
-    } else {
-        for (size_t i = 0; i < MAX_CLIENTS; ++i) {
-            struct session_state *client = clients[i];
-
-            if (client == NULL ||
-                client == state ||
-                !client->connected ||
-                !client->authenticated ||
-                !is_active_session(client) ||
-                strcmp(client->room, route->target) != 0) {
-                continue;
-            }
-
-            (void)send_textf(
-                client,
-                "CALL_RELAY|%s|%s|%lld|%lld|%s",
-                call_id,
-                state->username,
-                (long long)sequence_value,
-                (long long)server_now,
-                encrypted_frame
-            );
-        }
-    }
-
-    (void)insert_call_event(call_id, state->username, state->device_id, "relay_frame", "server_relay", NULL);
-    (void)send_textf(
-        state,
-        "OK|call_relay|%s|%lld|%lld",
-        call_id,
-        (long long)sequence_value,
-        (long long)server_now
-    );
-}
-
 static void handle_client_text(struct session_state *state, char *text) {
     char *cursor = text;
     char *command = next_field(&cursor);
@@ -2365,6 +2858,11 @@ static void handle_client_text(struct session_state *state, char *text) {
 
     if (strcmp(command, "SESSION_REFRESH") == 0) {
         handle_session_refresh(state, cursor);
+        return;
+    }
+
+    if (strcmp(command, "SESSION_CHALLENGE") == 0) {
+        handle_session_challenge(state, cursor);
         return;
     }
 
@@ -2452,11 +2950,6 @@ static void handle_client_text(struct session_state *state, char *text) {
 
     if (strcmp(command, "CALL_END") == 0) {
         handle_call_event_command(state, cursor, "call_end", "end");
-        return;
-    }
-
-    if (strcmp(command, "CALL_RELAY") == 0) {
-        handle_call_relay(state, cursor);
         return;
     }
 

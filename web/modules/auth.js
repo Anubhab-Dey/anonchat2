@@ -4,7 +4,7 @@ import { bytesToBase64Url, deriveBits, textToBase64 } from "./crypto-box.js";
 import { sendHello, storeSessionFromAuth } from "./device-session.js";
 import { sendWire, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
-import { afterAuthBackupRestore } from "./backup.js";
+import { afterAuthBackupRestore, deriveAndStoreBackupKey } from "./backup.js";
 import { setupDirectIdentity } from "./direct.js";
 
 export async function signup() {
@@ -54,6 +54,7 @@ export async function authenticate(command, username, password) {
   }
 
   await storeSessionFromAuth(parts);
+  await deriveAndStoreBackupKey(username, password);
   await setupDirectIdentity();
   await afterAuthBackupRestore();
   showToast("Signed in", "success");

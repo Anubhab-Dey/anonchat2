@@ -1,11 +1,18 @@
 import { state } from "./state.js";
-import { exportBackupData, importBackupData, dbPut } from "./local-db.js";
-import { derivePbkdf2Key, encryptJson, decryptJson } from "./crypto-box.js";
+import { exportBackupData, importBackupData, dbGet, dbPut } from "./local-db.js";
+import { deriveBits, bytesToBase64Url, base64UrlToBytes, encryptJson, decryptJson } from "./crypto-box.js";
 import { sendWire, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
 
 export async function afterAuthBackupRestore() {
-  if (!state.authenticated || !state.lastPassword) {
+  if (!state.authenticated) {
+    return;
+  }
+
+  const key = await backupKey();
+
+  if (!key) {
+    showToast("Backup locked. Sign in again with password to sync.", "warning");
     return;
   }
 
@@ -24,7 +31,6 @@ export async function afterAuthBackupRestore() {
 
     const version = Number(parts[1] || 0);
     const ciphertext = parts[3];
-    const key = await backupKey();
     const bundle = await decryptJson(key, ciphertext);
     await importBackupData(bundle);
     state.session.backupVersion = Math.max(state.session.backupVersion, version);
@@ -49,7 +55,17 @@ export function markBackupDirty() {
 }
 
 export async function uploadBackupIfDirty() {
-  if (!state.authenticated || !state.backupDirty || state.backupBusy || !state.lastPassword) {
+  if (!state.authenticated || !state.backupDirty || state.backupBusy) {
+    return;
+  }
+
+  const key = await backupKey();
+
+  if (!key) {
+    state.backupDirty = true;
+    state.backupLocked = true;
+    await persistBackupSettings(true);
+    showToast("Backup locked. Sign in again with password to sync.", "warning");
     return;
   }
 
@@ -57,7 +73,6 @@ export async function uploadBackupIfDirty() {
 
   try {
     const bundle = await exportBackupData(state.username);
-    const key = await backupKey();
     const ciphertext = await encryptJson(key, bundle);
     const nextVersion = Math.max(1, Number(state.session.backupVersion || 0) + 1);
     sendWire(`BACKUP_PUT|${nextVersion}|${bundle.client_created_at}|${ciphertext}`);
@@ -84,8 +99,55 @@ export async function uploadBackupIfDirty() {
   }
 }
 
+export async function deriveAndStoreBackupKey(username, password) {
+  const bits = await deriveBits(password, `anonchat-backup:${username.toLowerCase()}`);
+  const key = await importBackupKey(bits);
+  state.backupKey = key;
+  state.backupLocked = false;
+  await dbPut("settings", {
+    key: `backup_key:${username.toLowerCase()}`,
+    alg: "PBKDF2-SHA256-AESGCM-256",
+    bits: bytesToBase64Url(bits),
+    updatedAt: Date.now(),
+  });
+  return key;
+}
+
 async function backupKey() {
-  return derivePbkdf2Key(state.lastPassword, `anonchat-backup:${state.username.toLowerCase()}`);
+  if (state.backupKey) {
+    return state.backupKey;
+  }
+
+  const saved = await loadStoredBackupKey();
+
+  if (saved) {
+    state.backupKey = saved;
+    state.backupLocked = false;
+    return saved;
+  }
+
+  state.backupLocked = true;
+  return null;
+}
+
+async function loadStoredBackupKey() {
+  const username = (state.username || "").toLowerCase();
+
+  if (!username) {
+    return null;
+  }
+
+  const saved = await dbGet("settings", `backup_key:${username}`);
+
+  if (!saved || !saved.bits) {
+    return null;
+  }
+
+  return importBackupKey(base64UrlToBytes(saved.bits));
+}
+
+async function importBackupKey(bits) {
+  return crypto.subtle.importKey("raw", bits, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
 
 async function persistBackupSettings(dirty) {

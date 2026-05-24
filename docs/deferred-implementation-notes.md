@@ -1,33 +1,34 @@
 # Deferred Implementation Notes
 
-These notes capture intentionally deferred security-sensitive work so the next pass can continue without redesigning the current data model or protocol.
+These notes capture intentionally deferred work so the next pass can continue without redesigning the current model.
 
-## Call Relay Media
-
-Current state:
-- The backend has `CALL_INVITE`, `CALL_ACCEPT`, `CALL_DECLINE`, `CALL_END`, and `CALL_RELAY`.
-- The server stores call events and routes only opaque encrypted payloads/frames.
-- The frontend has a unified call session state, P2P-first transport selection, and automatic relay fallback state.
-- Relay fallback does not pretend media is complete; it fails closed after establishing the relay path.
-
-Next pass:
-1. Add browser media frame production for relay transport using WebRTC encoded transforms where available, with a WebCodecs/MediaStreamTrackProcessor fallback only if it can be kept reliable.
-2. Encrypt every audio/video relay frame in the browser before `CALL_RELAY` with the existing direct ECDH key for direct calls or the room relay key for room calls.
-3. Sequence frames per call participant and drop/reorder safely on the receiver.
-4. Decode/play decrypted frames locally; never send plaintext media to the server.
-5. Keep P2P as the preferred selected transport and avoid switching back from relay to P2P mid-call until a separate handoff state is added.
-
-## Device Signature Challenge
+## TURN Relay Deployment
 
 Current state:
-- Sessions are token-hash backed, one active session per account, bound to the stored device public key.
-- `SESSION_REFRESH` can re-bind a reconnecting socket after `HELLO` if the session token and device public key match.
-- `verify_device_signature(device_public_key, nonce, nonce_signature)` exists as the verification boundary, but full asymmetric signing is not wired yet.
+- Calls use WebRTC media only.
+- ICE servers are read from `web/config.js` through `window.ANONCHAT_CONFIG`.
+- The app attempts WebRTC normally first, allowing host/server-reflexive candidates to win.
+- If direct connectivity fails and trusted TURN servers are configured, ICE can select relay candidates automatically.
+- The UI can report direct or relayed connection by inspecting the selected ICE candidate pair.
+- The C server does not relay raw audio/video frames.
 
 Next pass:
-1. Add a server nonce challenge response instead of the current client-supplied placeholder signature.
-2. Store a device signing public key separately from the ECDH key if the browser key usages require it.
-3. Verify the signature server-side before rotating the session token.
+1. Deploy a first-party TURN service, preferably with TLS (`turns:`) and short-lived credentials.
+2. Generate/serve TURN credentials from trusted server-side deployment config instead of committing static secrets.
+3. Keep media in WebRTC DTLS-SRTP; the TURN server must only relay encrypted packets.
+4. Add an operations guide for recommended coturn hardening, logging limits, and credential rotation.
+
+## Call Ringer And State Flow
+
+Current state:
+- The backend keeps `CALL_INVITE`, `CALL_ACCEPT`, `CALL_DECLINE`, and `CALL_END`.
+- These commands carry opaque encrypted payloads and are for call state/ringer/event flow only.
+- Media fallback is handled by WebRTC ICE/TURN, not custom `CALL_RELAY` frames.
+
+Next pass:
+1. Finish incoming call accept/decline UI around the existing call event commands.
+2. Add missed-call and active-device push hooks after VAPID is implemented.
+3. Keep the call-event payload encrypted; do not add plaintext call metadata beyond routing fields.
 
 ## VAPID Push Delivery
 

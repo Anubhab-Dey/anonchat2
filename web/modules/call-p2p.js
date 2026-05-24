@@ -15,7 +15,10 @@ export function setPeerCallHandler(handler) {
 }
 
 export function rtcConfig() {
-  return { iceServers: appConfig.iceServers || [] };
+  return {
+    iceServers: appConfig.iceServers || [],
+    iceCandidatePoolSize: Number(appConfig.iceCandidatePoolSize || 0),
+  };
 }
 
 export function ensurePeerConnection(peerId, options = {}) {
@@ -387,16 +390,50 @@ export function renderPeers() {
 }
 
 function handlePeerConnectionState(peerId, value) {
-  window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value } }));
-
   if (value === "connected" || value === "completed") {
-    setCallStatus("Connected", "good");
-    showToast("Connected directly", "success");
+    detectSelectedTransport(state.pcs.get(peerId)).then((transport) => {
+      window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value, transport } }));
+      setCallStatus("Connected", "good");
+      showToast(transport === "server_relay" ? "Connected through relay" : "Connected directly", "success");
+    });
   } else if (value === "failed") {
+    window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value } }));
     setCallStatus("Reconnecting...", "warn");
   } else if (value === "disconnected") {
+    window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value } }));
     setCallStatus("Reconnecting...", "warn");
   } else if (value === "closed") {
+    window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value } }));
     setCallStatus("idle");
+  } else {
+    window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value } }));
+  }
+}
+
+async function detectSelectedTransport(pc) {
+  if (!pc || !pc.getStats) {
+    return "p2p";
+  }
+
+  try {
+    const stats = await pc.getStats();
+    let pair = null;
+
+    stats.forEach((entry) => {
+      if (entry.type === "candidate-pair" && (entry.selected || entry.nominated)) {
+        pair = entry;
+      }
+    });
+
+    if (!pair) {
+      return "p2p";
+    }
+
+    const local = stats.get(pair.localCandidateId);
+    const remote = stats.get(pair.remoteCandidateId);
+    return (local && local.candidateType === "relay") ||
+      (remote && remote.candidateType === "relay") ? "server_relay" : "p2p";
+  } catch {
+    return "p2p";
   }
 }

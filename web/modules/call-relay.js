@@ -3,33 +3,41 @@ import { sendWire } from "./wire.js";
 import { encryptJson, decryptJson, derivePbkdf2Key } from "./crypto-box.js";
 import { deriveDirectKey } from "./direct.js";
 import { showToast } from "./toast.js";
-import { setCallStatus } from "./ui.js";
+import { addSystemMessage, setCallStatus } from "./ui.js";
 
-export async function startRelayFallback(callSession) {
+export async function sendCallInvite(callSession) {
+  const payload = await encryptCallEventPayload(callSession, {
+    type: "call_invite",
+    call_id: callSession.call_id,
+    call_kind: callSession.call_kind,
+    caller_username: state.username,
+    at: Date.now(),
+  });
+  sendWire(`CALL_INVITE|${callSession.call_id}|${callSession.call_kind}|${callSession.target}|${payload}`);
+}
+
+export async function sendCallEnd(callSession) {
+  if (!callSession) {
+    return;
+  }
+
+  const payload = await encryptCallEventPayload(callSession, {
+    type: "call_end",
+    call_id: callSession.call_id,
+    at: Date.now(),
+  });
+  sendWire(`CALL_END|${callSession.call_id}|${payload}`);
+}
+
+export function markTurnFallback(callSession) {
   if (!callSession || callSession.selected_transport) {
     return;
   }
 
   callSession.call_state = "connecting_relay";
-  callSession.selected_transport = "server_relay";
   callSession.relay_started_at = Date.now();
   setCallStatus("Connecting securely...", "warn");
-  showToast("P2P failed, using secure relay", "warning");
-
-  const payload = await encryptRelayPayload(callSession, {
-    type: "relay_prepare",
-    call_id: callSession.call_id,
-    at: Date.now(),
-  });
-
-  sendWire(`CALL_INVITE|${callSession.call_id}|${callSession.call_kind}|${callSession.target}|${payload}`);
-
-  // Media relay is intentionally not faked in this pass. The protocol and state
-  // path are in place; encoded media frame production is the deferred step.
-  callSession.call_state = "failed";
-  callSession.ended_at = Date.now();
-  setCallStatus("Call failed", "bad");
-  showToast("Secure relay media is not enabled yet", "warning");
+  showToast("Trying relayed connection", "info");
 }
 
 export async function handleCallEvent(parts) {
@@ -39,45 +47,38 @@ export async function handleCallEvent(parts) {
   const payload = parts[5];
   const session = state.calls.sessions.get(callId);
 
-  if (!session || !payload) {
-    return;
+  if (session && payload) {
+    await decryptCallEventPayload(session, payload).catch(() => null);
   }
 
-  await decryptRelayPayload(session, payload).catch(() => null);
+  if (eventType === "invite") {
+    addSystemMessage(`incoming call from ${fromUsername}`);
+    showToast(`Incoming call from ${fromUsername}`, "info");
+    setCallStatus("Incoming call", "warn");
+    return;
+  }
 
   if (eventType === "end" || eventType === "decline") {
-    session.call_state = "ended";
-    session.ended_at = Date.now();
+    if (session) {
+      session.call_state = "ended";
+      session.ended_at = Date.now();
+    }
     setCallStatus("Call ended");
-  } else if (eventType === "invite") {
-    showToast(`Incoming call from ${fromUsername}`, "info");
   }
 }
 
-export async function handleRelayFrame(parts) {
-  const callId = parts[1];
-  const session = state.calls.sessions.get(callId);
-
-  if (!session) {
-    return;
-  }
-
-  // Opaque encrypted relay frames route through the server now. Browser encoded
-  // media frame integration is deferred, so there is no media payload to play yet.
-}
-
-async function relayKey(callSession) {
+async function eventKey(callSession) {
   if (callSession.call_kind === "direct" && callSession.peerPublicWire) {
     return deriveDirectKey(callSession.peerPublicWire);
   }
 
-  return derivePbkdf2Key(callSession.roomSecret || "", `anonchat:${callSession.room || ""}:relay-v1`);
+  return derivePbkdf2Key(callSession.roomSecret || "", `anonchat:${callSession.room || ""}:signal-v2`);
 }
 
-async function encryptRelayPayload(callSession, value) {
-  return encryptJson(await relayKey(callSession), value);
+async function encryptCallEventPayload(callSession, value) {
+  return encryptJson(await eventKey(callSession), value);
 }
 
-async function decryptRelayPayload(callSession, payload) {
-  return decryptJson(await relayKey(callSession), payload);
+async function decryptCallEventPayload(callSession, payload) {
+  return decryptJson(await eventKey(callSession), payload);
 }

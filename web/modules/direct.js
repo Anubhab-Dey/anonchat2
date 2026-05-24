@@ -1,7 +1,6 @@
 import { state, cleanUsername, directConversationId } from "./state.js";
 import { els } from "./dom.js";
-import { base64UrlToText, encryptJson, decryptJson } from "./crypto-box.js";
-import { ensureDeviceIdentity } from "./device-session.js";
+import { base64UrlToText, textToBase64Url, encryptJson, decryptJson } from "./crypto-box.js";
 import { dbGet, dbPut } from "./local-db.js";
 import { sendWire } from "./wire.js";
 import { showToast } from "./toast.js";
@@ -9,8 +8,35 @@ import { upsertConversation, openConversation, persistMessage, updateMessageStat
 import { notifyIfSubscribed } from "./notifications.js";
 
 export async function setupDirectIdentity() {
-  await ensureDeviceIdentity();
+  await ensureDirectIdentity();
   sendWire(`KEY|${state.identity.publicWire}`);
+}
+
+export async function ensureDirectIdentity() {
+  let saved = await dbGet("settings", "direct_identity");
+
+  if (!saved) {
+    const keyPair = await crypto.subtle.generateKey(
+      { name: "ECDH", namedCurve: "P-256" },
+      true,
+      ["deriveKey"]
+    );
+    saved = {
+      key: "direct_identity",
+      kind: "direct-ecdh-v1",
+      publicJwk: await crypto.subtle.exportKey("jwk", keyPair.publicKey),
+      privateJwk: await crypto.subtle.exportKey("jwk", keyPair.privateKey),
+    };
+    await dbPut("settings", saved);
+  }
+
+  const publicKey = await crypto.subtle.importKey("jwk", saved.publicJwk, { name: "ECDH", namedCurve: "P-256" }, true, []);
+  const privateKey = await crypto.subtle.importKey("jwk", saved.privateJwk, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveKey"]);
+  state.identity = {
+    keyPair: { publicKey, privateKey },
+    publicWire: textToBase64Url(JSON.stringify(saved.publicJwk)),
+  };
+  return state.identity;
 }
 
 export function rememberDirectPeer(username, peerId, publicWire) {
@@ -80,7 +106,7 @@ export async function requestDirectPeer(username, options = {}) {
 }
 
 export async function deriveDirectKey(publicWire) {
-  await ensureDeviceIdentity();
+  await ensureDirectIdentity();
   const publicJwk = JSON.parse(base64UrlToText(publicWire));
   const publicKey = await crypto.subtle.importKey("jwk", publicJwk, { name: "ECDH", namedCurve: "P-256" }, false, []);
   return crypto.subtle.deriveKey(
