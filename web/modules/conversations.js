@@ -101,7 +101,7 @@ export function renderConversations() {
     const main = document.createElement("button");
     main.type = "button";
     main.className = "conversation-main";
-    main.onclick = () => openConversation(conversation.id);
+    main.onclick = () => openConversation(conversation.id, { join: conversation.kind === "room" });
 
     const title = document.createElement("span");
     title.className = "conversation-title";
@@ -111,24 +111,37 @@ export function renderConversations() {
     preview.className = "conversation-preview";
     preview.textContent = conversation.preview || (conversation.kind === "dm" ? "direct message" : "room");
 
+    const actions = document.createElement("div");
+    actions.className = "conversation-actions";
+
+    const call = document.createElement("button");
+    call.type = "button";
+    call.className = "conversation-action quiet-button";
+    call.textContent = conversation.kind === "dm" ? "Call" : "Join";
+    call.onclick = () => {
+      window.dispatchEvent(new CustomEvent("anonchat:conversation-call", { detail: { conversation } }));
+    };
+
     const edit = document.createElement("button");
     edit.type = "button";
-    edit.className = "conversation-edit quiet-button";
+    edit.className = "conversation-action quiet-button";
     edit.title = "Rename";
-    edit.textContent = "Edit";
+    edit.textContent = "Rename";
     edit.onclick = () => renameConversation(conversation.id);
 
     main.appendChild(title);
     main.appendChild(preview);
     item.appendChild(main);
-    item.appendChild(edit);
+    actions.appendChild(call);
+    actions.appendChild(edit);
+    item.appendChild(actions);
     els.conversations.appendChild(item);
   }
 
   if (conversations.length === 0) {
     const empty = document.createElement("div");
     empty.className = "conversation-item";
-    empty.innerHTML = "<span class=\"conversation-preview\">No saved conversations yet</span>";
+    empty.innerHTML = "<span class=\"conversation-preview\">No chats yet</span>";
     els.conversations.appendChild(empty);
   }
 }
@@ -192,8 +205,8 @@ export async function renderConversationHistory(conversationId) {
 
 export function setActiveConversationHeader(conversation) {
   if (!conversation) {
-    els.conversationKind.textContent = "Current room";
-    els.roomTitle.textContent = "No room joined";
+    els.conversationKind.textContent = "Chat";
+    els.roomTitle.textContent = "Pick a chat";
     return;
   }
 

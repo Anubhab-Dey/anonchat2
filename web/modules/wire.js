@@ -40,23 +40,23 @@ export function connect() {
 
   clearTimeout(state.reconnectTimer);
   state.ws = new WebSocket(wsUrl(), "anonchat");
-  setStatus("connecting", "warn");
+  setStatus("Connecting", "warn");
 
   state.ws.onopen = () => {
     state.reconnectAttempts = 0;
-    setStatus("online", "good");
+    setStatus("Online", "good");
     flushWireQueue();
     notifyHandlers("OPEN", []);
   };
 
   state.ws.onclose = () => {
-    setStatus("offline", "bad");
+    setStatus("Offline", "bad");
     notifyHandlers("CLOSE", []);
     scheduleReconnect();
   };
 
   state.ws.onerror = () => {
-    setStatus("connection issue", "bad");
+    setStatus("Connection issue", "bad");
   };
 
   state.ws.onmessage = (event) => handleWireMessage(event.data);

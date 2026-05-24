@@ -13,12 +13,12 @@ export async function signup() {
   const password = els.password.value;
 
   if (!username || !password) {
-    showToast("Username and password required", "warning");
+    showToast("Enter a username and password", "warning");
     return;
   }
 
   if (password.length < 12) {
-    showToast("Use at least 12 characters", "warning");
+    showToast("Use a longer password", "warning");
     return;
   }
 
@@ -30,7 +30,7 @@ export async function login() {
   const password = els.password.value;
 
   if (!username || !password) {
-    showToast("Username and password required", "warning");
+    showToast("Enter your username and password", "warning");
     return;
   }
 
@@ -50,7 +50,7 @@ export async function authenticate(command, username, password) {
   );
 
   if (parts[0] !== "OK") {
-    showToast("Sign in failed", "error");
+    showToast("Could not sign in", "error");
     return;
   }
 
@@ -58,7 +58,7 @@ export async function authenticate(command, username, password) {
   await deriveAndStoreBackupKey(username, password);
   await setupDirectIdentity();
   await afterAuthBackupRestore();
-  showToast("Signed in", "success");
+  showToast("Ready", "success");
 }
 
 export function logoutLocalOnly() {

@@ -72,6 +72,14 @@ function bindEvents() {
   els.connectBtn.onclick = connect;
   els.signupBtn.onclick = () => signup().catch(() => showToast("Sign up failed", "error"));
   els.loginBtn.onclick = () => login().catch(() => showToast("Sign in failed", "error"));
+  els.quickChatBtn.onclick = () => {
+    els.directUsername.focus();
+    els.directUsername.select();
+  };
+  els.quickRoomBtn.onclick = () => {
+    createNewRoom();
+    els.room.focus();
+  };
   els.startDmBtn.onclick = () => startDirectConversation().catch(() => showToast("Direct message setup failed", "error"));
   els.directCallBtn.onclick = () => startDirectCall().catch(() => showToast("Direct call setup failed", "error"));
   els.notificationBtn.onclick = () => toggleNotifications().catch(() => showToast("Notifications unavailable", "warning"));
@@ -86,8 +94,9 @@ function bindEvents() {
   els.clearDeviceBtn.onclick = () => clearThisDevice().catch(() => showToast("Could not clear this device", "error"));
   els.signInAgainBtn.onclick = () => {
     signInAgain();
-    setIdentity("signed out", "warn");
+    setIdentity("Enter password", "warn");
     connect();
+    els.password.focus();
   };
 
   els.directUsername.addEventListener("keydown", (event) => {
@@ -115,6 +124,21 @@ function bindEvents() {
   });
   window.addEventListener("anonchat:room-opened", (event) => {
     openRoomFromConversation(event).catch(() => showToast("Room could not reopen", "error"));
+  });
+  window.addEventListener("anonchat:conversation-call", (event) => {
+    const conversation = event.detail.conversation;
+
+    if (!conversation) {
+      return;
+    }
+
+    if (conversation.kind === "dm") {
+      startDirectCall(conversation.username).catch(() => showToast("Could not start call", "error"));
+      return;
+    }
+
+    openConversation(conversation.id, { join: true })
+      .catch(() => showToast("Could not join room", "error"));
   });
   window.addEventListener("anonchat:backup-imported", () => {
     loadConversations().catch(() => {});
@@ -150,7 +174,7 @@ function bindProtocol() {
       return;
     }
 
-    setStatus("offline", "bad");
+    setStatus("Offline", "bad");
   });
 
   onWire("OK", (parts) => {
@@ -174,7 +198,7 @@ function bindProtocol() {
     const reason = parts[1] || "request";
 
     if (reason === "session") {
-      showBlockingScreen("Sign in required", "This device no longer has an active session. Your local chats are still here.");
+      showBlockingScreen("Sign in needed", "Your chats are still saved here. Sign in to keep using this device.");
       return;
     }
 
@@ -242,7 +266,7 @@ async function restoreLocalSessionSummary() {
   const saved = await loadSavedSession();
 
   if (!saved) {
-    setIdentity("signed out", "warn");
+    setIdentity("Not signed in", "warn");
     return;
   }
 

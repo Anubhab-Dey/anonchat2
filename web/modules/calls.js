@@ -26,7 +26,7 @@ const P2P_TIMEOUT_MS = 10000;
 
 export function initializeCalls() {
   setPeerCallHandler((peerId) => startRoomCall(peerId).catch(() => {
-    setCallStatus("Call failed", "bad");
+    setCallStatus("Could not connect", "bad");
   }));
   window.addEventListener("anonchat:p2p-state", (event) => {
     handleP2PState(event.detail.peerId, event.detail.state, event.detail.transport);
@@ -80,12 +80,12 @@ export async function startDirectCall(username = "") {
   const clean = cleanUsername(username || els.directUsername.value || (activeConversation() || {}).username || "");
 
   if (!clean) {
-    showToast("Username required", "warning");
+    showToast("Enter a username", "warning");
     return;
   }
 
   if (clean.toLowerCase() === state.username.toLowerCase()) {
-    showToast("Choose another username", "warning");
+    showToast("Use someone else's username", "warning");
     return;
   }
 
@@ -124,7 +124,7 @@ export async function startRoomCall(targetPeerId = null) {
   const peerIds = targetPeerId ? [targetPeerId] : [...state.peers.keys()];
 
   if (peerIds.length === 0) {
-    showToast("No peers to call", "warning");
+    showToast("No one else is here yet", "warning");
     return;
   }
 
@@ -161,7 +161,7 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
       startRelayFallback(callSession).catch(() => {
         callSession.call_state = "failed";
         callSession.ended_at = Date.now();
-        setCallStatus("Call failed", "bad");
+        setCallStatus("Could not connect", "bad");
       });
     }
   }, P2P_TIMEOUT_MS);
@@ -224,7 +224,7 @@ export async function startRelayFallback(callSession) {
     if (!callSession.peerId || !callSession.peerPublicWire) {
       callSession.call_state = "failed";
       callSession.ended_at = Date.now();
-      setCallStatus("Call failed", "bad");
+      setCallStatus("Could not connect", "bad");
       return;
     }
 
@@ -243,7 +243,7 @@ export async function startRelayFallback(callSession) {
   if (peerIds.length === 0) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
-    setCallStatus("Call failed", "bad");
+    setCallStatus("Could not connect", "bad");
     return;
   }
 
@@ -377,8 +377,8 @@ async function handleIncomingInvite(payload, fromUsername, serverNow, directPeer
   showIncomingCall(
     session,
     () => acceptIncomingCall(session).catch(() => {
-      setCallStatus("Call failed", "bad");
-      showToast("Call failed", "error");
+      setCallStatus("Could not connect", "bad");
+      showToast("Could not connect", "error");
     }),
     () => declineIncomingCall(session).catch(() => {})
   );
@@ -438,7 +438,7 @@ function handleP2PState(peerId, value, transport = null) {
         startRelayFallback(callSession).catch(() => {
           callSession.call_state = "failed";
           callSession.ended_at = Date.now();
-          setCallStatus("Call failed", "bad");
+          setCallStatus("Could not connect", "bad");
         });
       }
     }, 1000);

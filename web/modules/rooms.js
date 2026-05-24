@@ -60,8 +60,18 @@ export async function joinRoom() {
   const room = cleanRoomName(els.room.value);
   const secret = els.roomKey.value;
 
-  if (!room || !secret) {
-    showToast("Room name and key required", "warning");
+  if (!room) {
+    showToast("Enter a room name", "warning");
+    return;
+  }
+
+  if (!secret) {
+    if (els.roomAdvanced) {
+      els.roomAdvanced.open = true;
+    }
+
+    els.roomKey.focus();
+    showToast("Enter the room password", "warning");
     return;
   }
 
@@ -98,13 +108,23 @@ export function createNewRoom() {
   els.room.value = `room-${suffix}`;
   els.roomKey.value = randomKey(24);
   updateInvite();
-  showToast("New room ready", "success");
+  showToast("Private room ready", "success");
 }
 
 export async function copyInvite() {
   updateInvite();
 
   try {
+    if (navigator.share) {
+      await navigator.share({
+        title: "AnonChat invite",
+        text: "Join my private room",
+        url: els.inviteLink.value,
+      });
+      showToast("Invite shared", "success");
+      return;
+    }
+
     await navigator.clipboard.writeText(els.inviteLink.value);
     showToast("Invite copied", "success");
   } catch {

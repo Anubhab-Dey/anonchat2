@@ -126,8 +126,13 @@ export async function startDirectConversation() {
 
   const username = cleanUsername(els.directUsername.value);
 
-  if (!username || username.toLowerCase() === state.username.toLowerCase()) {
-    showToast("Choose another username", "warning");
+  if (!username) {
+    showToast("Enter a username", "warning");
+    return;
+  }
+
+  if (username.toLowerCase() === state.username.toLowerCase()) {
+    showToast("Use someone else's username", "warning");
     return;
   }
 

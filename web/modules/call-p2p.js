@@ -60,15 +60,15 @@ function createPeerConnection(peerId, options = {}) {
     try {
       await negotiate(peerId);
     } catch {
-      addSystemMessage("could not encrypt call setup");
-      setCallStatus("Call failed", "bad");
+      addSystemMessage("call could not start");
+      setCallStatus("Could not connect", "bad");
     }
   };
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       sendRtcSignal(peerId, { type: "candidate", candidate: event.candidate }).catch(() => {
-        addSystemMessage("could not encrypt call candidate");
+        addSystemMessage("call could not connect");
       });
     }
   };
@@ -289,8 +289,8 @@ export async function ensureLocalMedia() {
   }
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    addSystemMessage("camera and microphone prompts require HTTPS or localhost");
-    setCallStatus("media unavailable", "bad");
+    addSystemMessage("camera and microphone need HTTPS or localhost");
+    setCallStatus("Camera/mic unavailable", "bad");
     return false;
   }
 
@@ -309,7 +309,7 @@ export async function ensureLocalMedia() {
       addSystemMessage("camera or microphone could not be opened");
     }
 
-    setCallStatus("media blocked", "bad");
+    setCallStatus("Camera/mic blocked", "bad");
     return false;
   }
 }
@@ -406,7 +406,7 @@ export function renderPeers() {
     const channel = state.channels.get(peerId);
     const rtc = pc ? pc.connectionState : "new";
     const data = channel ? channel.readyState : "closed";
-    meta.textContent = `${peerId} | media ${rtc} | file ${data}`;
+    meta.textContent = rtc === "connected" || data === "open" ? "Ready" : "Waiting";
 
     top.appendChild(name);
     top.appendChild(callButton);

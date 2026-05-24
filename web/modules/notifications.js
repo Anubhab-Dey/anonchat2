@@ -19,7 +19,7 @@ export function updateNotificationButton() {
   }
 
   if (!("Notification" in window)) {
-    els.notificationBtn.textContent = "No notify";
+    els.notificationBtn.textContent = "Notifications off";
     els.notificationBtn.disabled = true;
     return;
   }
@@ -31,7 +31,7 @@ export function updateNotificationButton() {
   }
 
   els.notificationBtn.disabled = false;
-  els.notificationBtn.textContent = state.notificationsEnabled ? "Notify on" : "Notify";
+  els.notificationBtn.textContent = state.notificationsEnabled ? "Notifications on" : "Notifications";
 }
 
 export async function toggleNotifications() {
@@ -88,15 +88,15 @@ export async function notifyIfSubscribed(title, body, tag) {
 
 export async function requestStoragePersistence() {
   if (!navigator.storage || !navigator.storage.persist) {
-    setPill(els.storageState, "local");
+    setPill(els.storageState, "Saved here");
     return;
   }
 
   try {
     const persisted = await navigator.storage.persisted();
     const granted = persisted || await navigator.storage.persist();
-    setPill(els.storageState, granted ? "persistent" : "local", granted ? "good" : "warn");
+    setPill(els.storageState, granted ? "Saved on device" : "Saved here", granted ? "good" : "warn");
   } catch {
-    setPill(els.storageState, "local");
+    setPill(els.storageState, "Saved here");
   }
 }

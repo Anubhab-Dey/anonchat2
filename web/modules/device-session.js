@@ -145,8 +145,8 @@ export async function refreshSession() {
     return true;
   } catch {
     clearSessionOnly();
-    setIdentity("sign in required", "warn");
-    showToast("Session expired", "warning");
+    setIdentity("Sign in needed", "warn");
+    showToast("Please sign in again", "warning");
     return false;
   }
 }
@@ -177,8 +177,8 @@ export async function handleSessionReplaced(newDeviceId) {
     replacedBy: newDeviceId,
   });
   clearSessionOnly();
-  showToast("Account moved to another device", "warning");
-  showBlockingScreen("This account moved to another device.", "Local chats are still on this device. Sign in again to make this device active, or clear only this device.");
+  showToast("Account is active on another device", "warning");
+  showBlockingScreen("Use this device?", "Your chats are still saved here. Sign in to make this the active device, or clear only this device.");
 }
 
 export async function clearThisDevice() {

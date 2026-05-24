@@ -245,6 +245,16 @@ h2 {
   gap: 9px;
 }
 
+.quick-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.quick-actions button {
+  min-height: 42px;
+  text-align: left;
+}
+
 .primary-button {
   background: var(--accent);
   border-color: var(--accent);
@@ -274,6 +284,26 @@ h2 {
   display: grid;
   grid-template-columns: 1fr auto auto;
   gap: 8px;
+}
+
+.advanced-room {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #141a21;
+  padding: 0;
+}
+
+.advanced-room summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  list-style-position: inside;
+  padding: 10px 11px;
+}
+
+.advanced-room label {
+  border-top: 1px solid var(--line);
+  padding: 10px;
 }
 
 #inviteLink {
@@ -343,7 +373,14 @@ h2 {
   white-space: nowrap;
 }
 
-.conversation-edit {
+.conversation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.conversation-action {
   min-height: 30px;
   padding: 4px 8px;
 }
@@ -667,6 +704,18 @@ a {
   .direct-row button,
   .invite-row button {
     width: 100%;
+  }
+
+  .conversation-item {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-actions {
+    justify-content: stretch;
+  }
+
+  .conversation-action {
+    flex: 1;
   }
 
   .activity,

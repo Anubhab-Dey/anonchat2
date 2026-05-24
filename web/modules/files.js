@@ -13,7 +13,7 @@ let hashWarningShown = false;
 export function setupDataChannel(peerId, channel) {
   channel.bufferedAmountLowThreshold = 512 * 1024;
   channel.onopen = () => {
-    addSystemMessage(`file channel open with ${peerLabel(peerId)}`);
+    addSystemMessage(`files ready with ${peerLabel(peerId)}`);
     renderPeers();
   };
   channel.onclose = () => renderPeers();
@@ -37,7 +37,7 @@ export async function ensureFileChannels() {
 
 export function updateSelectedFile() {
   const file = els.fileInput.files[0];
-  els.selectedFile.textContent = file ? `${file.name} (${file.size} bytes)` : "No file selected";
+  els.selectedFile.textContent = file ? `${file.name} (${file.size} bytes)` : "No file chosen";
 }
 
 export async function sendSelectedFile() {
@@ -49,12 +49,12 @@ export async function sendSelectedFile() {
   }
 
   if (state.peers.size === 0) {
-    showToast("No peers for file transfer", "warning");
+    showToast("No one else is here yet", "warning");
     return;
   }
 
   if (!state.roomKeys || !state.roomKeys.file) {
-    showToast("Enter a room before sending files", "warning");
+    showToast("Join a room before sending files", "warning");
     return;
   }
 
@@ -183,6 +183,7 @@ async function handleDataMessage(peerId, raw) {
   if (hash !== transfer.hash || blob.size !== transfer.size) {
     addSystemMessage(`file check failed: ${transfer.name}`);
     state.incomingFiles.delete(msg.id);
+    showToast("File could not be verified", "error");
     return;
   }
 

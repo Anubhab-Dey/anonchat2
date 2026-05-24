@@ -25,7 +25,7 @@ export async function afterAuthBackupRestore() {
     );
 
     if (parts[0] === "ERR") {
-      showToast("Signed in", "success");
+      showToast("Ready", "success");
       return;
     }
 
@@ -38,7 +38,7 @@ export async function afterAuthBackupRestore() {
     showToast("Chats restored", "success");
     window.dispatchEvent(new Event("anonchat:backup-imported"));
   } catch {
-    showToast("Backup restore skipped", "warning");
+    showToast("Chats on this device are ready", "warning");
   }
 }
 
@@ -90,7 +90,7 @@ export async function uploadBackupIfDirty() {
     state.session.backupVersion = Number(parts[2] || nextVersion);
     state.backupDirty = false;
     await persistBackupSettings(false);
-    showToast("Backup saved", "success");
+    showToast("Chats saved", "success");
   } catch {
     state.backupDirty = true;
     await persistBackupSettings(true);
