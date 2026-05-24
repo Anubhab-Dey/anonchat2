@@ -1,0 +1,19 @@
+{
+  "name": "AnonChat",
+  "short_name": "AnonChat",
+  "id": "/",
+  "description": "Private rooms for chat, calls, and direct file sharing.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

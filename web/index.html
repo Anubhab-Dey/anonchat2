@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#101418" />
+    <title>AnonChat</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="rail" aria-label="Account and rooms">
+        <header class="brand">
+          <div class="brand-mark" aria-hidden="true">A</div>
+          <div>
+            <h1>AnonChat</h1>
+            <p id="status">offline</p>
+          </div>
+          <button id="connectBtn" class="icon-button" type="button" title="Reconnect">R</button>
+        </header>
+
+        <section id="authCard" class="surface stack">
+          <div class="section-head">
+            <h2>Identity</h2>
+            <span id="identityState" class="pill">signed out</span>
+          </div>
+          <label>
+            Username
+            <input id="username" autocomplete="username" maxlength="32" required />
+          </label>
+          <label>
+            Password
+            <input id="password" type="password" autocomplete="current-password" required />
+          </label>
+          <div class="split-actions">
+            <button id="signupBtn" type="button">Create</button>
+            <button id="loginBtn" type="button">Sign in</button>
+          </div>
+        </section>
+
+        <section class="surface stack">
+          <div class="section-head">
+            <h2>Conversations</h2>
+            <div class="conversation-tools">
+              <button id="notificationBtn" class="quiet-button" type="button">Notify</button>
+              <span id="storageState" class="pill">local</span>
+            </div>
+          </div>
+          <div class="direct-row">
+            <input id="directUsername" maxlength="32" placeholder="username" aria-label="Direct username" />
+            <button id="startDmBtn" type="button">Text</button>
+            <button id="directCallBtn" type="button">Call</button>
+          </div>
+          <div id="conversations" class="conversations"></div>
+        </section>
+
+        <section class="surface stack">
+          <div class="section-head">
+            <h2>Room</h2>
+            <button id="newRoomBtn" class="quiet-button" type="button">New</button>
+          </div>
+          <label>
+            Name
+            <input id="room" maxlength="64" value="lobby" required />
+          </label>
+          <label>
+            Key
+            <input id="roomKey" type="password" autocomplete="off" required />
+          </label>
+          <button id="joinBtn" class="primary-button" type="button">Enter room</button>
+          <div class="invite-row">
+            <input id="inviteLink" readonly aria-label="Invite link" />
+            <button id="copyInviteBtn" type="button">Copy</button>
+          </div>
+        </section>
+
+        <section class="surface stack">
+          <div class="section-head">
+            <h2>People</h2>
+            <span id="peerCount" class="pill">0 online</span>
+          </div>
+          <div id="peers" class="peers"></div>
+        </section>
+      </aside>
+
+      <section class="conversation" aria-label="Conversation">
+        <header class="room-bar">
+          <div>
+            <p id="conversationKind" class="eyebrow">Current room</p>
+            <h2 id="roomTitle">No room joined</h2>
+          </div>
+          <div class="room-actions">
+            <button id="startCallBtn" type="button">Call all</button>
+            <button id="stopCallBtn" type="button">End</button>
+          </div>
+        </header>
+
+        <div id="messages" class="messages" aria-live="polite"></div>
+
+        <form id="messageForm" class="composer">
+          <button id="attachBtn" class="icon-button" type="button" title="Choose file">+</button>
+          <textarea id="messageInput" rows="1" maxlength="4000" placeholder="Message"></textarea>
+          <button id="sendBtn" class="primary-button" type="submit">Send</button>
+          <input id="fileInput" type="file" hidden />
+        </form>
+      </section>
+
+      <aside class="activity" aria-label="Calls and files">
+        <section class="surface stack">
+          <div class="section-head">
+            <h2>Call</h2>
+            <span id="callStatus" class="pill">idle</span>
+          </div>
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div id="remoteVideos" class="remote-videos"></div>
+        </section>
+
+        <section class="surface stack">
+          <div class="section-head">
+            <h2>Files</h2>
+            <button id="sendFileBtn" class="quiet-button" type="button">Send selected</button>
+          </div>
+          <div id="selectedFile" class="file-hint">No file selected</div>
+          <div id="files" class="files"></div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/config.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
