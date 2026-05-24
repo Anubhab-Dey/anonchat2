@@ -1,5 +1,16 @@
 export const appConfig = window.ANONCHAT_CONFIG || { iceServers: [] };
 
+export function getIceServers() {
+  return Array.isArray(appConfig.iceServers) ? appConfig.iceServers : [];
+}
+
+export function hasTurnRelayConfigured() {
+  return getIceServers().some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => typeof url === "string" && /^turns?:/i.test(url));
+  });
+}
+
 export const state = {
   ws: null,
   authenticated: false,

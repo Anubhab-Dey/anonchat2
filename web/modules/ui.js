@@ -45,6 +45,30 @@ export function hideBlockingScreen() {
   }
 }
 
+export function showIncomingCall(session, onAccept, onDecline) {
+  if (!els.incomingCallScreen) {
+    return;
+  }
+
+  els.incomingCallTitle.textContent = "Incoming call";
+  els.incomingCallText.textContent = session.call_kind === "room" ?
+    `${session.caller_username || "Someone"} is calling this room.` :
+    `${session.caller_username || "Someone"} is calling you.`;
+  els.acceptCallBtn.onclick = onAccept;
+  els.declineCallBtn.onclick = onDecline;
+  els.incomingCallScreen.hidden = false;
+}
+
+export function hideIncomingCall() {
+  if (!els.incomingCallScreen) {
+    return;
+  }
+
+  els.incomingCallScreen.hidden = true;
+  els.acceptCallBtn.onclick = null;
+  els.declineCallBtn.onclick = null;
+}
+
 export function addSystemMessage(text) {
   addMessageNode(text, "system");
 }

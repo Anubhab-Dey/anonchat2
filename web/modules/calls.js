@@ -1,7 +1,7 @@
 import { state, activeConversation, cleanUsername } from "./state.js";
 import { els } from "./dom.js";
 import { showToast } from "./toast.js";
-import { addSystemMessage, setCallStatus } from "./ui.js";
+import { addSystemMessage, hideIncomingCall, setCallStatus, showIncomingCall } from "./ui.js";
 import { requestDirectPeer } from "./direct.js";
 import { upsertConversation, openConversation } from "./conversations.js";
 import { directConversationId } from "./state.js";
@@ -11,10 +11,9 @@ import {
   addLocalTracksTo,
   negotiate,
   stopP2PMedia,
-  peerLabel,
   setPeerCallHandler,
 } from "./call-p2p.js";
-import { markTurnFallback, sendCallInvite, sendCallEnd } from "./call-relay.js";
+import { markTurnFallback, sendCallInvite, sendCallEnd, sendCallAccept, sendCallDecline } from "./call-relay.js";
 
 const P2P_TIMEOUT_MS = 10000;
 
@@ -46,6 +45,7 @@ export function createCallSession(options) {
     relay_connected_at: null,
     ended_at: null,
     fallbackTimer: null,
+    incoming: Boolean(options.incoming),
   };
   state.calls.sessions.set(session.call_id, session);
   state.calls.active = session;
@@ -130,7 +130,8 @@ export async function startRoomCall(targetPeerId = null) {
   await startP2PAttempt(session, peerIds);
 }
 
-export async function startP2PAttempt(callSession, roomPeerIds = null) {
+export async function startP2PAttempt(callSession, roomPeerIds = null, options = {}) {
+  const shouldSendInvite = options.sendInvite !== false;
   const ok = await ensureLocalMedia();
 
   if (!ok) {
@@ -150,7 +151,9 @@ export async function startP2PAttempt(callSession, roomPeerIds = null) {
     }
   }, P2P_TIMEOUT_MS);
 
-  await sendCallInvite(callSession).catch(() => {});
+  if (shouldSendInvite) {
+    await sendCallInvite(callSession).catch(() => {});
+  }
 
   if (callSession.call_kind === "direct") {
     const pc = ensurePeerConnection(callSession.peerId, {
@@ -191,21 +194,121 @@ export function selectCallTransport(callSession, transport) {
   showToast("Connected through relay", "success");
 }
 
-export function endCallSession(callSession = state.calls.active) {
+export function endCallSession(callSession = state.calls.active, options = {}) {
   if (!callSession) {
     stopP2PMedia();
     setCallStatus("idle");
     return;
   }
 
+  const shouldNotify = options.notify !== false;
   clearTimeout(callSession.fallbackTimer);
   callSession.call_state = "ended";
   callSession.ended_at = Date.now();
-  sendCallEnd(callSession).catch(() => {});
+  if (shouldNotify) {
+    sendCallEnd(callSession).catch(() => {});
+  }
   stopP2PMedia();
   state.calls.active = null;
+  hideIncomingCall();
   setCallStatus("idle");
   addSystemMessage("call ended");
+}
+
+export async function handleCallEvent(parts) {
+  const eventType = parts[1];
+  const callId = parts[2];
+  const fromUsername = parts[3];
+  const session = state.calls.sessions.get(callId);
+
+  if (eventType === "invite") {
+    await handleIncomingInvite(callId, fromUsername);
+    return;
+  }
+
+  if (eventType === "accept") {
+    if (session) {
+      session.call_state = "connecting_p2p";
+      setCallStatus("Connecting securely...", "warn");
+    }
+    return;
+  }
+
+  if (eventType === "decline") {
+    if (session) {
+      session.call_state = "ended";
+      session.ended_at = Date.now();
+    }
+    hideIncomingCall();
+    setCallStatus("Call declined", "warn");
+    return;
+  }
+
+  if (eventType === "end") {
+    endCallSession(session || state.calls.active, { notify: false });
+  }
+}
+
+async function handleIncomingInvite(callId, fromUsername) {
+  let peer = null;
+
+  try {
+    peer = await requestDirectPeer(fromUsername, { fresh: true });
+  } catch {
+    peer = null;
+  }
+
+  const session = createCallSession({
+    call_id: callId,
+    call_kind: peer ? "direct" : "room",
+    caller_username: fromUsername,
+    callee_username: state.username,
+    target: peer ? fromUsername : state.room,
+    room: peer ? null : state.room,
+    roomSecret: state.pendingRoomSecret || els.roomKey.value,
+    peerId: peer ? peer.peerId : null,
+    peerPublicWire: peer ? peer.publicWire : "",
+    incoming: true,
+  });
+  session.call_state = "ringing";
+  addSystemMessage(`incoming call from ${fromUsername}`);
+  showToast(`Incoming call from ${fromUsername}`, "info");
+  setCallStatus("Incoming call", "warn");
+  showIncomingCall(
+    session,
+    () => acceptIncomingCall(session).catch(() => {
+      setCallStatus("Call failed", "bad");
+      showToast("Call failed", "error");
+    }),
+    () => declineIncomingCall(session).catch(() => {})
+  );
+}
+
+async function acceptIncomingCall(callSession) {
+  hideIncomingCall();
+  callSession.call_state = "connecting_p2p";
+
+  if (callSession.call_kind === "direct" && (!callSession.peerId || !callSession.peerPublicWire)) {
+    const peer = await requestDirectPeer(callSession.caller_username, { fresh: true });
+    callSession.peerId = peer.peerId;
+    callSession.peerPublicWire = peer.publicWire;
+    callSession.target = peer.username;
+  }
+
+  await sendCallAccept(callSession).catch(() => {});
+  const peers = callSession.call_kind === "room" ? [...state.peers.keys()] : null;
+  await startP2PAttempt(callSession, peers, { sendInvite: false });
+}
+
+async function declineIncomingCall(callSession) {
+  hideIncomingCall();
+  callSession.call_state = "ended";
+  callSession.ended_at = Date.now();
+  await sendCallDecline(callSession).catch(() => {});
+  if (state.calls.active === callSession) {
+    state.calls.active = null;
+  }
+  setCallStatus("Call declined", "warn");
 }
 
 function handleP2PState(peerId, value, transport = "p2p") {

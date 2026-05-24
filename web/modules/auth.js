@@ -1,11 +1,12 @@
 import { state, cleanUsername } from "./state.js";
 import { els } from "./dom.js";
-import { bytesToBase64Url, deriveBits, textToBase64 } from "./crypto-box.js";
+import { bytesToBase64Url, deriveBits, hasWebCrypto } from "./crypto-box.js";
 import { sendHello, storeSessionFromAuth } from "./device-session.js";
 import { sendWire, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { afterAuthBackupRestore, deriveAndStoreBackupKey } from "./backup.js";
 import { setupDirectIdentity } from "./direct.js";
+import { showBanner } from "./ui.js";
 
 export async function signup() {
   const username = cleanUsername(els.username.value);
@@ -68,8 +69,11 @@ export function logoutLocalOnly() {
 }
 
 async function deriveAuthField(username, password) {
-  if (!window.crypto || !crypto.subtle) {
-    return textToBase64(password);
+  if (!hasWebCrypto()) {
+    const message = "HTTPS or localhost is required for secure login/signup.";
+    showToast(message, "error");
+    showBanner(message, "warn");
+    throw new Error("secure auth unavailable");
   }
 
   const proof = await deriveBits(password, `anonchat-account:${username.toLowerCase()}`);

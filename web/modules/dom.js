@@ -41,6 +41,11 @@ export const els = {
   blockingText: document.getElementById("blockingText"),
   clearDeviceBtn: document.getElementById("clearDeviceBtn"),
   signInAgainBtn: document.getElementById("signInAgainBtn"),
+  incomingCallScreen: document.getElementById("incomingCallScreen"),
+  incomingCallTitle: document.getElementById("incomingCallTitle"),
+  incomingCallText: document.getElementById("incomingCallText"),
+  acceptCallBtn: document.getElementById("acceptCallBtn"),
+  declineCallBtn: document.getElementById("declineCallBtn"),
   banner: document.getElementById("appBanner"),
 };
 

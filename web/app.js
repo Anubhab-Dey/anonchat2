@@ -41,6 +41,7 @@ import {
   startActiveCall,
   startDirectCall,
   endCallSession,
+  handleCallEvent,
 } from "./modules/calls.js";
 import {
   addPeer,
@@ -50,7 +51,6 @@ import {
   handleSignal,
   handleDirectSignal,
 } from "./modules/call-p2p.js";
-import { handleCallEvent } from "./modules/call-relay.js";
 import { sendSelectedFile, updateSelectedFile } from "./modules/files.js";
 import {
   loadNotificationSetting,

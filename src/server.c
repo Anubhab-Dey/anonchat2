@@ -98,6 +98,7 @@ static struct call_route calls[CALL_SLOTS];
 static sqlite3 *account_db = NULL;
 
 static char *next_field(char **cursor);
+static int is_active_session(struct session_state *state);
 
 static size_t bounded_strlen(const char *text, size_t max) {
     size_t len = 0;
@@ -1132,6 +1133,7 @@ static struct session_state *find_client_by_peer_id(const char *peer_id) {
         if (client != NULL &&
             client->connected &&
             client->authenticated &&
+            is_active_session(client) &&
             strcmp(client->peer_id, peer_id) == 0) {
             return client;
         }
@@ -1151,6 +1153,7 @@ static struct session_state *find_client_by_username(const char *username) {
         if (client != NULL &&
             client->connected &&
             client->authenticated &&
+            is_active_session(client) &&
             strcmp(client->username, username) == 0) {
             return client;
         }
@@ -2262,6 +2265,7 @@ static void broadcast_room(
         if (client == NULL ||
             !client->connected ||
             !client->authenticated ||
+            !is_active_session(client) ||
             client->room[0] == '\0' ||
             strcmp(client->room, room) != 0) {
             continue;
@@ -2319,6 +2323,7 @@ static void join_room(struct session_state *state, const char *room) {
             client == state ||
             !client->connected ||
             !client->authenticated ||
+            !is_active_session(client) ||
             strcmp(client->room, state->room) != 0) {
             continue;
         }
@@ -2894,6 +2899,10 @@ static void handle_client_text(struct session_state *state, char *text) {
     }
 
     if (strcmp(command, "LEAVE") == 0) {
+        if (!require_active_session(state)) {
+            return;
+        }
+
         if (cursor != NULL) {
             (void)send_textf(state, "ERR|leave");
             return;

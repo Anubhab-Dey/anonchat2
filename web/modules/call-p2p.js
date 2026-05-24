@@ -1,4 +1,4 @@
-import { appConfig, state, cleanUsername } from "./state.js";
+import { appConfig, state, cleanUsername, getIceServers } from "./state.js";
 import { els } from "./dom.js";
 import { encryptJson, decryptJson } from "./crypto-box.js";
 import { sendWire } from "./wire.js";
@@ -16,7 +16,7 @@ export function setPeerCallHandler(handler) {
 
 export function rtcConfig() {
   return {
-    iceServers: appConfig.iceServers || [],
+    iceServers: getIceServers(),
     iceCandidatePoolSize: Number(appConfig.iceCandidatePoolSize || 0),
   };
 }
