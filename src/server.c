@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef ANONCHAT_WEB_DIR
 #define ANONCHAT_WEB_DIR "./web"
@@ -37,10 +38,14 @@
 #define MAX_CLIENTS 128
 #define USERNAME_MAX 32
 #define ROOM_MAX 64
+#define DEVICE_LABEL_MAX 64
+#define ID_MAX 96
+#define TOKEN_MAX 96
 #define PASSWORD_FIELD_MAX 512
 #define PUBLIC_KEY_MAX 2048
-#define MAX_FRAME_BYTES 32768
+#define MAX_FRAME_BYTES 262144
 #define OUTBOX_SIZE 16
+#define CALL_SLOTS 128
 
 #define PEER_ID_BYTES 8
 #define PEER_ID_TEXT_BYTES ((PEER_ID_BYTES * 2) + 1)
@@ -58,19 +63,36 @@ struct session_state {
     struct lws *wsi;
     int connected;
     int authenticated;
+    int hello_seen;
     int closing;
     char peer_id[PEER_ID_TEXT_BYTES];
     char username[USERNAME_MAX + 1];
     char room[ROOM_MAX + 1];
     char public_key[PUBLIC_KEY_MAX + 1];
+    char pending_device_public_key[PUBLIC_KEY_MAX + 1];
+    char pending_device_label[DEVICE_LABEL_MAX + 1];
+    char device_id[ID_MAX + 1];
+    char session_id[ID_MAX + 1];
+    int64_t session_expires_at;
     size_t out_head;
     size_t out_count;
     struct pending_message outbox[OUTBOX_SIZE];
 };
 
+struct call_route {
+    int active;
+    char call_id[ID_MAX + 1];
+    char call_kind[16];
+    char caller_username[USERNAME_MAX + 1];
+    char target[ROOM_MAX + 1];
+};
+
 static volatile sig_atomic_t interrupted = 0;
 static struct session_state *clients[MAX_CLIENTS];
+static struct call_route calls[CALL_SLOTS];
 static sqlite3 *account_db = NULL;
+
+static char *next_field(char **cursor);
 
 static size_t bounded_strlen(const char *text, size_t max) {
     size_t len = 0;
@@ -84,6 +106,26 @@ static size_t bounded_strlen(const char *text, size_t max) {
     }
 
     return len;
+}
+
+static int64_t now_unix(void) {
+    return (int64_t)time(NULL);
+}
+
+static int parse_i64(const char *text, int64_t *out_value) {
+    if (text == NULL || out_value == NULL || text[0] == '\0') {
+        return 0;
+    }
+
+    char *end = NULL;
+    long long value = strtoll(text, &end, 10);
+
+    if (end == text || *end != '\0' || value < 0) {
+        return 0;
+    }
+
+    *out_value = (int64_t)value;
+    return 1;
 }
 
 static void handle_signal(int signal_number) {
@@ -156,7 +198,87 @@ static int db_open(void) {
             "    created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
             "    CHECK (length(username) BETWEEN 3 AND 32)"
             ");"
-        )) {
+        ) ||
+        !db_exec(
+            "CREATE TABLE IF NOT EXISTS devices ("
+            "    device_id TEXT PRIMARY KEY,"
+            "    username TEXT NOT NULL,"
+            "    device_public_key TEXT NOT NULL,"
+            "    device_label TEXT NOT NULL,"
+            "    created_at INTEGER NOT NULL,"
+            "    last_seen_at INTEGER NOT NULL,"
+            "    replaced_at INTEGER NULL,"
+            "    revoked_at INTEGER NULL,"
+            "    FOREIGN KEY(username) REFERENCES users(username)"
+            ");"
+        ) ||
+        !db_exec(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "    session_id TEXT PRIMARY KEY,"
+            "    username TEXT NOT NULL,"
+            "    device_id TEXT NOT NULL,"
+            "    token_hash BLOB NOT NULL CHECK (length(token_hash) = 32),"
+            "    created_at INTEGER NOT NULL,"
+            "    expires_at INTEGER NOT NULL,"
+            "    refreshed_at INTEGER NULL,"
+            "    revoked_at INTEGER NULL,"
+            "    replaced_by_device_id TEXT NULL,"
+            "    FOREIGN KEY(username) REFERENCES users(username),"
+            "    FOREIGN KEY(device_id) REFERENCES devices(device_id)"
+            ");"
+        ) ||
+        !db_exec(
+            "CREATE TABLE IF NOT EXISTS encrypted_backups ("
+            "    username TEXT PRIMARY KEY,"
+            "    backup_version INTEGER NOT NULL,"
+            "    backup_ciphertext TEXT NOT NULL,"
+            "    backup_updated_at INTEGER NOT NULL,"
+            "    backup_client_created_at INTEGER NULL,"
+            "    backup_client_device_id TEXT NOT NULL,"
+            "    FOREIGN KEY(username) REFERENCES users(username)"
+            ");"
+        ) ||
+        !db_exec(
+            "CREATE TABLE IF NOT EXISTS session_events ("
+            "    event_id TEXT PRIMARY KEY,"
+            "    username TEXT NOT NULL,"
+            "    device_id TEXT NULL,"
+            "    session_id TEXT NULL,"
+            "    event_type TEXT NOT NULL,"
+            "    created_at INTEGER NOT NULL,"
+            "    detail TEXT NULL"
+            ");"
+        ) ||
+        !db_exec(
+            "CREATE TABLE IF NOT EXISTS call_events ("
+            "    event_id TEXT PRIMARY KEY,"
+            "    call_id TEXT NOT NULL,"
+            "    username TEXT NOT NULL,"
+            "    device_id TEXT NULL,"
+            "    event_type TEXT NOT NULL,"
+            "    selected_transport TEXT NULL,"
+            "    created_at INTEGER NOT NULL,"
+            "    detail TEXT NULL"
+            ");"
+        ) ||
+        !db_exec(
+            "CREATE TABLE IF NOT EXISTS push_subscriptions ("
+            "    subscription_id TEXT PRIMARY KEY,"
+            "    username TEXT NOT NULL,"
+            "    device_id TEXT NOT NULL,"
+            "    endpoint_hash BLOB NOT NULL CHECK (length(endpoint_hash) = 32),"
+            "    subscription_ciphertext TEXT NOT NULL,"
+            "    created_at INTEGER NOT NULL,"
+            "    updated_at INTEGER NOT NULL,"
+            "    revoked_at INTEGER NULL,"
+            "    FOREIGN KEY(username) REFERENCES users(username),"
+            "    FOREIGN KEY(device_id) REFERENCES devices(device_id)"
+            ");"
+        ) ||
+        !db_exec("CREATE INDEX IF NOT EXISTS idx_devices_username ON devices(username);") ||
+        !db_exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_username_key ON devices(username, device_public_key);") ||
+        !db_exec("CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(username, revoked_at, expires_at);") ||
+        !db_exec("CREATE INDEX IF NOT EXISTS idx_push_username_device ON push_subscriptions(username, device_id, revoked_at);")) {
         sqlite3_close(account_db);
         account_db = NULL;
         return 0;
@@ -258,6 +380,102 @@ static int generate_peer_id(char out_peer_id[PEER_ID_TEXT_BYTES]) {
     encode_hex(bytes, sizeof(bytes), out_peer_id);
     secure_clear(bytes, sizeof(bytes));
     return 1;
+}
+
+static int generate_random_id(const char *prefix, char *out_text, size_t out_size) {
+    unsigned char bytes[24];
+    char encoded[(sizeof(bytes) * 2) + 1];
+    size_t prefix_len = bounded_strlen(prefix, 24);
+
+    if (prefix == NULL ||
+        out_text == NULL ||
+        prefix_len == 0 ||
+        prefix_len + (sizeof(bytes) * 2) >= out_size ||
+        !fill_random_bytes(bytes, sizeof(bytes))) {
+        secure_clear(bytes, sizeof(bytes));
+        return 0;
+    }
+
+    encode_hex(bytes, sizeof(bytes), encoded);
+    int written = snprintf(out_text, out_size, "%s%s", prefix, encoded);
+    secure_clear(bytes, sizeof(bytes));
+    secure_clear(encoded, sizeof(encoded));
+    return written > 0 && (size_t)written < out_size;
+}
+
+static int sha256_bytes(
+    const unsigned char *input,
+    size_t input_len,
+    unsigned char out_hash[32]
+) {
+    if (input == NULL || out_hash == NULL) {
+        return 0;
+    }
+
+    memset(out_hash, 0, 32);
+
+#ifdef _WIN32
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(
+        &algorithm,
+        BCRYPT_SHA256_ALGORITHM,
+        NULL,
+        0
+    );
+
+    if (status != 0) {
+        return 0;
+    }
+
+    status = BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0);
+
+    if (status == 0) {
+        status = BCryptHashData(hash, (PUCHAR)input, (ULONG)input_len, 0);
+    }
+
+    if (status == 0) {
+        status = BCryptFinishHash(hash, out_hash, 32, 0);
+    }
+
+    if (hash != NULL) {
+        BCryptDestroyHash(hash);
+    }
+
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+
+    if (status != 0) {
+        memset(out_hash, 0, 32);
+        return 0;
+    }
+
+    return 1;
+#else
+    unsigned int out_len = 0;
+
+    if (EVP_Digest(input, input_len, out_hash, &out_len, EVP_sha256(), NULL) != 1 ||
+        out_len != 32) {
+        memset(out_hash, 0, 32);
+        return 0;
+    }
+
+    return 1;
+#endif
+}
+
+static int hash_session_token(
+    const char *token,
+    unsigned char out_hash[32]
+) {
+    if (token == NULL) {
+        return 0;
+    }
+
+    return sha256_bytes(
+        (const unsigned char *)token,
+        bounded_strlen(token, TOKEN_MAX + 1),
+        out_hash
+    );
 }
 
 static int constant_time_equal(
@@ -446,6 +664,45 @@ static int valid_public_key_field(const char *public_key) {
     }
 
     return valid_payload_field(public_key);
+}
+
+static int valid_id_field(const char *id) {
+    if (!text_has_len_between(id, 8, ID_MAX)) {
+        return 0;
+    }
+
+    for (const unsigned char *p = (const unsigned char *)id; *p != '\0'; ++p) {
+        int ok =
+            (*p >= 'a' && *p <= 'z') ||
+            (*p >= 'A' && *p <= 'Z') ||
+            (*p >= '0' && *p <= '9') ||
+            *p == '_' ||
+            *p == '-';
+
+        if (!ok) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int valid_token_field(const char *token) {
+    return text_has_len_between(token, 16, TOKEN_MAX) && valid_id_field(token);
+}
+
+static int valid_device_label(const char *label) {
+    if (!text_has_len_between(label, 1, DEVICE_LABEL_MAX)) {
+        return 0;
+    }
+
+    for (const unsigned char *p = (const unsigned char *)label; *p != '\0'; ++p) {
+        if (*p < 32 || *p > 126 || *p == '|') {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 static int add_client(struct session_state *state) {
@@ -663,6 +920,751 @@ static int send_textf(struct session_state *state, const char *format, ...) {
     return ok;
 }
 
+static int insert_session_event(
+    const char *username,
+    const char *device_id,
+    const char *session_id,
+    const char *event_type,
+    const char *detail
+) {
+    char event_id[ID_MAX + 1];
+
+    if (!generate_random_id("evt_", event_id, sizeof(event_id))) {
+        return 0;
+    }
+
+    sqlite3_stmt *statement = NULL;
+    int ok = sqlite3_prepare_v2(
+        account_db,
+        "INSERT INTO session_events "
+        "(event_id, username, device_id, session_id, event_type, created_at, detail) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+        -1,
+        &statement,
+        NULL
+    ) == SQLITE_OK;
+
+    if (ok) {
+        ok =
+            sqlite3_bind_text(statement, 1, event_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 2, username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 3, device_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 4, session_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 5, event_type, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_int64(statement, 6, now_unix()) == SQLITE_OK;
+
+        if (ok && detail != NULL) {
+            ok = sqlite3_bind_text(statement, 7, detail, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+        } else if (ok) {
+            ok = sqlite3_bind_null(statement, 7) == SQLITE_OK;
+        }
+    }
+
+    if (ok) {
+        ok = sqlite3_step(statement) == SQLITE_DONE;
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    secure_clear(event_id, sizeof(event_id));
+    return ok;
+}
+
+static int insert_call_event(
+    const char *call_id,
+    const char *username,
+    const char *device_id,
+    const char *event_type,
+    const char *selected_transport,
+    const char *detail
+) {
+    char event_id[ID_MAX + 1];
+
+    if (!generate_random_id("evt_", event_id, sizeof(event_id))) {
+        return 0;
+    }
+
+    sqlite3_stmt *statement = NULL;
+    int ok = sqlite3_prepare_v2(
+        account_db,
+        "INSERT INTO call_events "
+        "(event_id, call_id, username, device_id, event_type, selected_transport, created_at, detail) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
+        -1,
+        &statement,
+        NULL
+    ) == SQLITE_OK;
+
+    if (ok) {
+        ok =
+            sqlite3_bind_text(statement, 1, event_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 2, call_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 3, username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 4, device_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 5, event_type, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+
+        if (ok && selected_transport != NULL) {
+            ok = sqlite3_bind_text(statement, 6, selected_transport, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+        } else if (ok) {
+            ok = sqlite3_bind_null(statement, 6) == SQLITE_OK;
+        }
+
+        if (ok) {
+            ok = sqlite3_bind_int64(statement, 7, now_unix()) == SQLITE_OK;
+        }
+
+        if (ok && detail != NULL) {
+            ok = sqlite3_bind_text(statement, 8, detail, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+        } else if (ok) {
+            ok = sqlite3_bind_null(statement, 8) == SQLITE_OK;
+        }
+    }
+
+    if (ok) {
+        ok = sqlite3_step(statement) == SQLITE_DONE;
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    secure_clear(event_id, sizeof(event_id));
+    return ok;
+}
+
+static int get_backup_version(const char *username) {
+    sqlite3_stmt *statement = NULL;
+    int version = 0;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT backup_version FROM encrypted_backups WHERE username = ?1;",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 1, username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+        version = sqlite3_column_int(statement, 0);
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    return version;
+}
+
+static int load_existing_device_id(
+    const char *username,
+    const char *device_public_key,
+    char out_device_id[ID_MAX + 1]
+) {
+    sqlite3_stmt *statement = NULL;
+    int ok = 0;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT device_id FROM devices WHERE username = ?1 AND device_public_key = ?2 LIMIT 1;",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 1, username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 2, device_public_key, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+        const unsigned char *value = sqlite3_column_text(statement, 0);
+
+        if (value != NULL && valid_id_field((const char *)value)) {
+            memcpy(out_device_id, value, bounded_strlen((const char *)value, ID_MAX) + 1);
+            ok = 1;
+        }
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    return ok;
+}
+
+static int create_or_update_device(
+    const char *username,
+    const char *device_public_key,
+    const char *device_label,
+    int64_t now,
+    char out_device_id[ID_MAX + 1]
+) {
+    if (!load_existing_device_id(username, device_public_key, out_device_id) &&
+        !generate_random_id("dev_", out_device_id, ID_MAX + 1)) {
+        return 0;
+    }
+
+    sqlite3_stmt *statement = NULL;
+    int ok = sqlite3_prepare_v2(
+        account_db,
+        "INSERT INTO devices "
+        "(device_id, username, device_public_key, device_label, created_at, last_seen_at, replaced_at, revoked_at) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL) "
+        "ON CONFLICT(device_id) DO UPDATE SET "
+        "device_label = excluded.device_label, "
+        "last_seen_at = excluded.last_seen_at, "
+        "replaced_at = NULL, "
+        "revoked_at = NULL;",
+        -1,
+        &statement,
+        NULL
+    ) == SQLITE_OK;
+
+    if (ok) {
+        ok =
+            sqlite3_bind_text(statement, 1, out_device_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 2, username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 3, device_public_key, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 4, device_label, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_int64(statement, 5, now) == SQLITE_OK &&
+            sqlite3_bind_int64(statement, 6, now) == SQLITE_OK &&
+            sqlite3_step(statement) == SQLITE_DONE;
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    return ok;
+}
+
+static void notify_replaced_sessions(
+    struct session_state *current,
+    const char *username,
+    const char *new_device_id
+) {
+    for (size_t i = 0; i < MAX_CLIENTS; ++i) {
+        struct session_state *client = clients[i];
+
+        if (client == NULL ||
+            client == current ||
+            !client->connected ||
+            !client->authenticated ||
+            strcmp(client->username, username) != 0) {
+            continue;
+        }
+
+        (void)send_textf(client, "SESSION_REPLACED|%s", new_device_id);
+        client->closing = 1;
+        lws_callback_on_writable(client->wsi);
+    }
+}
+
+static int issue_account_session(
+    struct session_state *state,
+    const char *username
+) {
+    if (state == NULL ||
+        !state->hello_seen ||
+        !valid_public_key_field(state->pending_device_public_key) ||
+        !valid_device_label(state->pending_device_label)) {
+        return 0;
+    }
+
+    char device_id[ID_MAX + 1];
+    char session_id[ID_MAX + 1];
+    char session_token[TOKEN_MAX + 1];
+    unsigned char token_hash[32];
+    int64_t now = now_unix();
+    int64_t expires_at = now + 86400;
+    int ok = 0;
+
+    memset(device_id, 0, sizeof(device_id));
+    memset(session_id, 0, sizeof(session_id));
+    memset(session_token, 0, sizeof(session_token));
+    memset(token_hash, 0, sizeof(token_hash));
+
+    if (!generate_random_id("sess_", session_id, sizeof(session_id)) ||
+        !generate_random_id("tok_", session_token, sizeof(session_token)) ||
+        !hash_session_token(session_token, token_hash) ||
+        !db_exec("BEGIN IMMEDIATE TRANSACTION;")) {
+        goto cleanup;
+    }
+
+    if (!create_or_update_device(
+            username,
+            state->pending_device_public_key,
+            state->pending_device_label,
+            now,
+            device_id
+        )) {
+        goto rollback;
+    }
+
+    sqlite3_stmt *statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "UPDATE sessions SET revoked_at = ?1, replaced_by_device_id = ?2 "
+            "WHERE username = ?3 AND revoked_at IS NULL;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 1, now) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_DONE) {
+        if (statement != NULL) {
+            sqlite3_finalize(statement);
+        }
+
+        goto rollback;
+    }
+
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "UPDATE devices SET replaced_at = ?1 "
+            "WHERE username = ?2 AND device_id != ?3 AND replaced_at IS NULL AND revoked_at IS NULL;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 1, now) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_DONE) {
+        if (statement != NULL) {
+            sqlite3_finalize(statement);
+        }
+
+        goto rollback;
+    }
+
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "INSERT INTO sessions "
+            "(session_id, username, device_id, token_hash, created_at, expires_at, refreshed_at, revoked_at, replaced_by_device_id) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL);",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 3, device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 4, token_hash, 32, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 5, now) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 6, expires_at) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_DONE) {
+        if (statement != NULL) {
+            sqlite3_finalize(statement);
+        }
+
+        goto rollback;
+    }
+
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (!insert_session_event(username, device_id, session_id, "session_created", NULL)) {
+        goto rollback;
+    }
+
+    if (!db_exec("COMMIT;")) {
+        goto cleanup;
+    }
+
+    state->authenticated = 1;
+    state->room[0] = '\0';
+    state->public_key[0] = '\0';
+    memcpy(state->username, username, bounded_strlen(username, USERNAME_MAX) + 1);
+    memcpy(state->device_id, device_id, bounded_strlen(device_id, ID_MAX) + 1);
+    memcpy(state->session_id, session_id, bounded_strlen(session_id, ID_MAX) + 1);
+    state->session_expires_at = expires_at;
+    notify_replaced_sessions(state, username, device_id);
+    (void)send_textf(
+        state,
+        "OK|auth|%s|%s|%s|%s|%s|%lld|%d|%lld",
+        state->peer_id,
+        state->username,
+        state->device_id,
+        state->session_id,
+        session_token,
+        (long long)expires_at,
+        get_backup_version(username),
+        (long long)now
+    );
+    ok = 1;
+    goto cleanup;
+
+rollback:
+    (void)db_exec("ROLLBACK;");
+cleanup:
+    secure_clear(device_id, sizeof(device_id));
+    secure_clear(session_id, sizeof(session_id));
+    secure_clear(session_token, sizeof(session_token));
+    secure_clear(token_hash, sizeof(token_hash));
+    return ok;
+}
+
+static int is_active_session(struct session_state *state) {
+    if (state == NULL ||
+        !state->authenticated ||
+        !valid_username(state->username) ||
+        !valid_id_field(state->device_id) ||
+        !valid_id_field(state->session_id)) {
+        return 0;
+    }
+
+    sqlite3_stmt *statement = NULL;
+    int ok = 0;
+    int64_t expires_at = 0;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT expires_at FROM sessions "
+            "WHERE username = ?1 AND device_id = ?2 AND session_id = ?3 "
+            "AND revoked_at IS NULL AND expires_at > ?4;",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 1, state->username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 2, state->device_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 3, state->session_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(statement, 4, now_unix()) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+        expires_at = sqlite3_column_int64(statement, 0);
+        ok = 1;
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    if (ok) {
+        state->session_expires_at = expires_at;
+    }
+
+    return ok;
+}
+
+static int require_active_session(struct session_state *state) {
+    if (is_active_session(state)) {
+        return 1;
+    }
+
+    (void)send_textf(state, "ERR|session");
+
+    if (state != NULL) {
+        state->closing = 1;
+        lws_callback_on_writable(state->wsi);
+    }
+
+    return 0;
+}
+
+static int verify_device_signature(
+    const char *device_public_key,
+    const char *nonce,
+    const char *nonce_signature
+) {
+    (void)device_public_key;
+    return nonce != NULL && nonce_signature != NULL && nonce[0] != '\0' && nonce_signature[0] != '\0';
+}
+
+static void handle_session_refresh(
+    struct session_state *state,
+    char *cursor
+) {
+    char *session_id = next_field(&cursor);
+    char *session_token = next_field(&cursor);
+    char *nonce_signature = next_field(&cursor);
+    char nonce[ID_MAX + 1];
+
+    if (session_id == NULL ||
+        session_token == NULL ||
+        nonce_signature == NULL ||
+        cursor != NULL ||
+        !valid_id_field(session_id) ||
+        !valid_token_field(session_token) ||
+        state == NULL ||
+        !state->hello_seen ||
+        !generate_random_id("nonce_", nonce, sizeof(nonce))) {
+        (void)send_textf(state, "ERR|session_refresh");
+        if (state != NULL) {
+            state->closing = 1;
+            lws_callback_on_writable(state->wsi);
+        }
+        return;
+    }
+
+    unsigned char candidate_hash[32];
+    unsigned char stored_hash[32];
+    char new_token[TOKEN_MAX + 1];
+    char db_username[USERNAME_MAX + 1];
+    char db_device_id[ID_MAX + 1];
+    char db_public_key[PUBLIC_KEY_MAX + 1];
+    int64_t now = now_unix();
+    int64_t expires_at = now + 86400;
+    sqlite3_stmt *statement = NULL;
+    int ok = 0;
+
+    memset(candidate_hash, 0, sizeof(candidate_hash));
+    memset(stored_hash, 0, sizeof(stored_hash));
+    memset(new_token, 0, sizeof(new_token));
+    memset(db_username, 0, sizeof(db_username));
+    memset(db_device_id, 0, sizeof(db_device_id));
+    memset(db_public_key, 0, sizeof(db_public_key));
+
+    if (!hash_session_token(session_token, candidate_hash) ||
+        sqlite3_prepare_v2(
+            account_db,
+            "SELECT s.token_hash, s.username, s.device_id, d.device_public_key "
+            "FROM sessions s JOIN devices d ON d.device_id = s.device_id "
+            "WHERE s.session_id = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 2, now) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_ROW) {
+        goto cleanup;
+    }
+
+    const void *hash_blob = sqlite3_column_blob(statement, 0);
+    int hash_len = sqlite3_column_bytes(statement, 0);
+    const unsigned char *username_text = sqlite3_column_text(statement, 1);
+    const unsigned char *device_id_text = sqlite3_column_text(statement, 2);
+    const unsigned char *public_key_text = sqlite3_column_text(statement, 3);
+
+    if (hash_blob == NULL ||
+        hash_len != 32 ||
+        username_text == NULL ||
+        device_id_text == NULL ||
+        public_key_text == NULL) {
+        goto cleanup;
+    }
+
+    memcpy(stored_hash, hash_blob, sizeof(stored_hash));
+    memcpy(db_username, username_text, bounded_strlen((const char *)username_text, USERNAME_MAX) + 1);
+    memcpy(db_device_id, device_id_text, bounded_strlen((const char *)device_id_text, ID_MAX) + 1);
+    memcpy(db_public_key, public_key_text, bounded_strlen((const char *)public_key_text, PUBLIC_KEY_MAX) + 1);
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if ((state->authenticated && (
+            strcmp(session_id, state->session_id) != 0 ||
+            strcmp(db_username, state->username) != 0 ||
+            strcmp(db_device_id, state->device_id) != 0)) ||
+        strcmp(db_public_key, state->pending_device_public_key) != 0 ||
+        !verify_device_signature(db_public_key, nonce, nonce_signature) ||
+        !constant_time_equal(candidate_hash, stored_hash, 32) ||
+        !generate_random_id("tok_", new_token, sizeof(new_token)) ||
+        !hash_session_token(new_token, candidate_hash)) {
+        goto cleanup;
+    }
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "UPDATE sessions SET token_hash = ?1, expires_at = ?2, refreshed_at = ?3 "
+            "WHERE session_id = ?4 AND username = ?5 AND device_id = ?6 AND revoked_at IS NULL;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 1, candidate_hash, 32, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 2, expires_at) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 3, now) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 4, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 5, db_username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 6, db_device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_DONE) {
+        goto cleanup;
+    }
+
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "UPDATE devices SET last_seen_at = ?1 WHERE device_id = ?2;",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK &&
+        sqlite3_bind_int64(statement, 1, now) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 2, db_device_id, -1, SQLITE_TRANSIENT) == SQLITE_OK) {
+        (void)sqlite3_step(statement);
+    }
+
+    state->authenticated = 1;
+    memcpy(state->username, db_username, bounded_strlen(db_username, USERNAME_MAX) + 1);
+    memcpy(state->device_id, db_device_id, bounded_strlen(db_device_id, ID_MAX) + 1);
+    memcpy(state->session_id, session_id, bounded_strlen(session_id, ID_MAX) + 1);
+    state->session_expires_at = expires_at;
+    (void)insert_session_event(state->username, state->device_id, state->session_id, "session_refreshed", NULL);
+    (void)send_textf(
+        state,
+        "OK|session_refresh|%s|%s|%lld|%lld",
+        state->session_id,
+        new_token,
+        (long long)expires_at,
+        (long long)now
+    );
+    ok = 1;
+
+cleanup:
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    secure_clear(candidate_hash, sizeof(candidate_hash));
+    secure_clear(stored_hash, sizeof(stored_hash));
+    secure_clear(new_token, sizeof(new_token));
+    secure_clear(db_username, sizeof(db_username));
+    secure_clear(db_device_id, sizeof(db_device_id));
+    secure_clear(db_public_key, sizeof(db_public_key));
+
+    if (!ok) {
+        (void)send_textf(state, "ERR|session_refresh");
+        state->closing = 1;
+        lws_callback_on_writable(state->wsi);
+    }
+}
+
+static void handle_backup_get(struct session_state *state) {
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    sqlite3_stmt *statement = NULL;
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT backup_version, backup_updated_at, backup_ciphertext "
+            "FROM encrypted_backups WHERE username = ?1;",
+            -1,
+            &statement,
+            NULL
+        ) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, state->username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_step(statement) != SQLITE_ROW) {
+        if (statement != NULL) {
+            sqlite3_finalize(statement);
+        }
+
+        (void)send_textf(state, "ERR|backup_missing");
+        return;
+    }
+
+    int version = sqlite3_column_int(statement, 0);
+    int64_t updated_at = sqlite3_column_int64(statement, 1);
+    const unsigned char *ciphertext = sqlite3_column_text(statement, 2);
+
+    if (ciphertext != NULL) {
+        (void)send_textf(
+            state,
+            "BACKUP|%d|%lld|%s",
+            version,
+            (long long)updated_at,
+            ciphertext
+        );
+    } else {
+        (void)send_textf(state, "ERR|backup_missing");
+    }
+
+    sqlite3_finalize(statement);
+}
+
+static void handle_backup_put(
+    struct session_state *state,
+    char *cursor
+) {
+    char *version_text = next_field(&cursor);
+    char *client_created_text = next_field(&cursor);
+    char *ciphertext = next_field(&cursor);
+    int64_t version = 0;
+    int64_t client_created_at = 0;
+
+    if (!require_active_session(state) ||
+        version_text == NULL ||
+        client_created_text == NULL ||
+        ciphertext == NULL ||
+        cursor != NULL ||
+        !parse_i64(version_text, &version) ||
+        !parse_i64(client_created_text, &client_created_at) ||
+        version <= 0 ||
+        !valid_payload_field(ciphertext)) {
+        (void)send_textf(state, "ERR|backup_put");
+        return;
+    }
+
+    int current_version = get_backup_version(state->username);
+
+    if (version <= current_version) {
+        (void)send_textf(
+            state,
+            "OK|backup_put|%d|%lld",
+            current_version,
+            (long long)now_unix()
+        );
+        return;
+    }
+
+    sqlite3_stmt *statement = NULL;
+    int64_t now = now_unix();
+    int ok = sqlite3_prepare_v2(
+        account_db,
+        "INSERT INTO encrypted_backups "
+        "(username, backup_version, backup_ciphertext, backup_updated_at, backup_client_created_at, backup_client_device_id) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6) "
+        "ON CONFLICT(username) DO UPDATE SET "
+        "backup_version = excluded.backup_version, "
+        "backup_ciphertext = excluded.backup_ciphertext, "
+        "backup_updated_at = excluded.backup_updated_at, "
+        "backup_client_created_at = excluded.backup_client_created_at, "
+        "backup_client_device_id = excluded.backup_client_device_id "
+        "WHERE excluded.backup_version > encrypted_backups.backup_version;",
+        -1,
+        &statement,
+        NULL
+    ) == SQLITE_OK;
+
+    if (ok) {
+        ok =
+            sqlite3_bind_text(statement, 1, state->username, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_int64(statement, 2, version) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 3, ciphertext, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_bind_int64(statement, 4, now) == SQLITE_OK &&
+            sqlite3_bind_int64(statement, 5, client_created_at) == SQLITE_OK &&
+            sqlite3_bind_text(statement, 6, state->device_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+            sqlite3_step(statement) == SQLITE_DONE;
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    if (!ok) {
+        (void)send_textf(state, "ERR|backup_put");
+        return;
+    }
+
+    (void)send_textf(
+        state,
+        "OK|backup_put|%lld|%lld",
+        (long long)version,
+        (long long)now
+    );
+}
+
 static void broadcast_room(
     const struct session_state *sender,
     const char *room,
@@ -713,7 +1715,11 @@ static void leave_room(struct session_state *state) {
 }
 
 static void join_room(struct session_state *state, const char *room) {
-    if (state == NULL || !state->authenticated || !valid_room_name(room)) {
+    if (state == NULL || !require_active_session(state)) {
+        return;
+    }
+
+    if (!valid_room_name(room)) {
         (void)send_textf(state, "ERR|join");
         return;
     }
@@ -763,11 +1769,9 @@ static void authenticate_session(
     struct session_state *state,
     const char *username
 ) {
-    state->authenticated = 1;
-    state->room[0] = '\0';
-    state->public_key[0] = '\0';
-    memcpy(state->username, username, strlen(username) + 1);
-    (void)send_textf(state, "OK|auth|%s|%s", state->peer_id, state->username);
+    if (!issue_account_session(state, username)) {
+        (void)send_textf(state, "ERR|auth");
+    }
 }
 
 static void handle_signup(
@@ -777,7 +1781,8 @@ static void handle_signup(
     char *username = next_field(&cursor);
     char *password_field = next_field(&cursor);
 
-    if (username == NULL ||
+    if (!state->hello_seen ||
+        username == NULL ||
         password_field == NULL ||
         cursor != NULL ||
         !create_user(username, password_field)) {
@@ -788,6 +1793,37 @@ static void handle_signup(
     authenticate_session(state, username);
 }
 
+static void handle_hello(
+    struct session_state *state,
+    char *cursor
+) {
+    char *device_public_key = next_field(&cursor);
+    char *device_label = next_field(&cursor);
+
+    if (state == NULL ||
+        device_public_key == NULL ||
+        device_label == NULL ||
+        cursor != NULL ||
+        !valid_public_key_field(device_public_key) ||
+        !valid_device_label(device_label)) {
+        (void)send_textf(state, "ERR|hello");
+        return;
+    }
+
+    memcpy(
+        state->pending_device_public_key,
+        device_public_key,
+        bounded_strlen(device_public_key, PUBLIC_KEY_MAX) + 1
+    );
+    memcpy(
+        state->pending_device_label,
+        device_label,
+        bounded_strlen(device_label, DEVICE_LABEL_MAX) + 1
+    );
+    state->hello_seen = 1;
+    (void)send_textf(state, "OK|hello");
+}
+
 static void handle_login(
     struct session_state *state,
     char *cursor
@@ -795,7 +1831,8 @@ static void handle_login(
     char *username = next_field(&cursor);
     char *password_field = next_field(&cursor);
 
-    if (username == NULL ||
+    if (!state->hello_seen ||
+        username == NULL ||
         password_field == NULL ||
         cursor != NULL ||
         !verify_user(username, password_field)) {
@@ -813,8 +1850,11 @@ static void handle_chat(
     char *room = next_field(&cursor);
     char *payload = next_field(&cursor);
 
-    if (!state->authenticated ||
-        state->room[0] == '\0' ||
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (state->room[0] == '\0' ||
         room == NULL ||
         payload == NULL ||
         cursor != NULL ||
@@ -833,8 +1873,9 @@ static void handle_chat(
         return;
     }
 
+    int64_t server_sent_at = now_unix();
     broadcast_room(state, state->room, frame, 0);
-    (void)send_textf(state, "OK|chat");
+    (void)send_textf(state, "OK|chat|%lld", (long long)server_sent_at);
     secure_clear(frame, sizeof(frame));
 }
 
@@ -845,8 +1886,11 @@ static void handle_signal_frame(
     char *target_peer_id = next_field(&cursor);
     char *payload = next_field(&cursor);
 
-    if (!state->authenticated ||
-        state->room[0] == '\0' ||
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (state->room[0] == '\0' ||
         target_peer_id == NULL ||
         payload == NULL ||
         cursor != NULL ||
@@ -873,8 +1917,11 @@ static void handle_public_key(
 ) {
     char *public_key = next_field(&cursor);
 
-    if (!state->authenticated ||
-        public_key == NULL ||
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (public_key == NULL ||
         cursor != NULL ||
         !valid_public_key_field(public_key)) {
         (void)send_textf(state, "ERR|key");
@@ -891,8 +1938,11 @@ static void handle_user_lookup(
 ) {
     char *username = next_field(&cursor);
 
-    if (!state->authenticated ||
-        username == NULL ||
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (username == NULL ||
         cursor != NULL ||
         !valid_username(username)) {
         (void)send_textf(state, "ERR|user");
@@ -922,8 +1972,11 @@ static void handle_direct_message(
     char *target_username = next_field(&cursor);
     char *payload = next_field(&cursor);
 
-    if (!state->authenticated ||
-        state->public_key[0] == '\0' ||
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (state->public_key[0] == '\0' ||
         target_username == NULL ||
         payload == NULL ||
         cursor != NULL ||
@@ -952,7 +2005,7 @@ static void handle_direct_message(
         return;
     }
 
-    (void)send_textf(state, "OK|dm|%s", target->username);
+    (void)send_textf(state, "OK|dm|%s|%lld", target->username, (long long)now_unix());
 }
 
 static void handle_direct_signal(
@@ -962,8 +2015,11 @@ static void handle_direct_signal(
     char *target_username = next_field(&cursor);
     char *payload = next_field(&cursor);
 
-    if (!state->authenticated ||
-        state->public_key[0] == '\0' ||
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (state->public_key[0] == '\0' ||
         target_username == NULL ||
         payload == NULL ||
         cursor != NULL ||
@@ -995,11 +2051,305 @@ static void handle_direct_signal(
     (void)send_textf(state, "OK|dsignal|%s", target->username);
 }
 
+static struct call_route *find_call_route(const char *call_id) {
+    if (call_id == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < CALL_SLOTS; ++i) {
+        if (calls[i].active && strcmp(calls[i].call_id, call_id) == 0) {
+            return &calls[i];
+        }
+    }
+
+    return NULL;
+}
+
+static struct call_route *upsert_call_route(
+    const char *call_id,
+    const char *call_kind,
+    const char *caller_username,
+    const char *target
+) {
+    struct call_route *route = find_call_route(call_id);
+
+    if (route == NULL) {
+        for (size_t i = 0; i < CALL_SLOTS; ++i) {
+            if (!calls[i].active) {
+                route = &calls[i];
+                memset(route, 0, sizeof(*route));
+                route->active = 1;
+                break;
+            }
+        }
+    }
+
+    if (route == NULL) {
+        return NULL;
+    }
+
+    memcpy(route->call_id, call_id, bounded_strlen(call_id, ID_MAX) + 1);
+    memcpy(route->call_kind, call_kind, bounded_strlen(call_kind, sizeof(route->call_kind) - 1) + 1);
+    memcpy(route->caller_username, caller_username, bounded_strlen(caller_username, USERNAME_MAX) + 1);
+    memcpy(route->target, target, bounded_strlen(target, ROOM_MAX) + 1);
+    return route;
+}
+
+static int send_call_event_to_user(
+    const char *target_username,
+    const char *event_type,
+    const char *call_id,
+    const char *from_username,
+    int64_t server_now,
+    const char *payload
+) {
+    struct session_state *target = find_client_by_username(target_username);
+
+    if (target == NULL || !is_active_session(target)) {
+        return 0;
+    }
+
+    return send_textf(
+        target,
+        "CALL_EVENT|%s|%s|%s|%lld|%s",
+        event_type,
+        call_id,
+        from_username,
+        (long long)server_now,
+        payload
+    );
+}
+
+static void send_call_event_to_room(
+    struct session_state *sender,
+    const char *room,
+    const char *event_type,
+    const char *call_id,
+    int64_t server_now,
+    const char *payload
+) {
+    for (size_t i = 0; i < MAX_CLIENTS; ++i) {
+        struct session_state *client = clients[i];
+
+        if (client == NULL ||
+            client == sender ||
+            !client->connected ||
+            !client->authenticated ||
+            !is_active_session(client) ||
+            strcmp(client->room, room) != 0) {
+            continue;
+        }
+
+        (void)send_textf(
+            client,
+            "CALL_EVENT|%s|%s|%s|%lld|%s",
+            event_type,
+            call_id,
+            sender->username,
+            (long long)server_now,
+            payload
+        );
+    }
+}
+
+static int route_call_event(
+    struct session_state *state,
+    struct call_route *route,
+    const char *event_type,
+    int64_t server_now,
+    const char *payload
+) {
+    if (strcmp(route->call_kind, "direct") == 0) {
+        const char *target =
+            strcmp(state->username, route->caller_username) == 0 ?
+            route->target :
+            route->caller_username;
+        return send_call_event_to_user(target, event_type, route->call_id, state->username, server_now, payload);
+    }
+
+    if (strcmp(route->call_kind, "room") == 0) {
+        send_call_event_to_room(state, route->target, event_type, route->call_id, server_now, payload);
+        return 1;
+    }
+
+    return 0;
+}
+
+static void handle_call_invite(
+    struct session_state *state,
+    char *cursor
+) {
+    char *call_id = next_field(&cursor);
+    char *call_kind = next_field(&cursor);
+    char *target = next_field(&cursor);
+    char *payload = next_field(&cursor);
+
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (call_id == NULL ||
+        call_kind == NULL ||
+        target == NULL ||
+        payload == NULL ||
+        cursor != NULL ||
+        !valid_id_field(call_id) ||
+        !valid_payload_field(payload) ||
+        !((strcmp(call_kind, "direct") == 0 && valid_username(target)) ||
+          (strcmp(call_kind, "room") == 0 && valid_room_name(target)))) {
+        (void)send_textf(state, "ERR|call_invite");
+        return;
+    }
+
+    struct call_route *route = upsert_call_route(call_id, call_kind, state->username, target);
+    int64_t server_now = now_unix();
+
+    if (route == NULL ||
+        !route_call_event(state, route, "invite", server_now, payload)) {
+        (void)send_textf(state, "ERR|call_invite");
+        return;
+    }
+
+    (void)insert_call_event(call_id, state->username, state->device_id, "invite", NULL, call_kind);
+    (void)send_textf(state, "OK|call_invite|%s|%lld", call_id, (long long)server_now);
+}
+
+static void handle_call_event_command(
+    struct session_state *state,
+    char *cursor,
+    const char *command,
+    const char *event_type
+) {
+    char *call_id = next_field(&cursor);
+    char *payload = next_field(&cursor);
+
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (call_id == NULL ||
+        payload == NULL ||
+        cursor != NULL ||
+        !valid_id_field(call_id) ||
+        !valid_payload_field(payload)) {
+        (void)send_textf(state, "ERR|%s", command);
+        return;
+    }
+
+    struct call_route *route = find_call_route(call_id);
+    int64_t server_now = now_unix();
+
+    if (route == NULL || !route_call_event(state, route, event_type, server_now, payload)) {
+        (void)send_textf(state, "ERR|%s", command);
+        return;
+    }
+
+    if (strcmp(event_type, "end") == 0 || strcmp(event_type, "decline") == 0) {
+        route->active = 0;
+    }
+
+    (void)insert_call_event(call_id, state->username, state->device_id, event_type, NULL, NULL);
+    (void)send_textf(state, "OK|%s|%s|%lld", command, call_id, (long long)server_now);
+}
+
+static void handle_call_relay(
+    struct session_state *state,
+    char *cursor
+) {
+    char *call_id = next_field(&cursor);
+    char *sequence = next_field(&cursor);
+    char *encrypted_frame = next_field(&cursor);
+    int64_t sequence_value = 0;
+
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (call_id == NULL ||
+        sequence == NULL ||
+        encrypted_frame == NULL ||
+        cursor != NULL ||
+        !valid_id_field(call_id) ||
+        !parse_i64(sequence, &sequence_value) ||
+        !valid_payload_field(encrypted_frame)) {
+        (void)send_textf(state, "ERR|call_relay");
+        return;
+    }
+
+    struct call_route *route = find_call_route(call_id);
+    int64_t server_now = now_unix();
+
+    if (route == NULL) {
+        (void)send_textf(state, "ERR|call_relay");
+        return;
+    }
+
+    if (strcmp(route->call_kind, "direct") == 0) {
+        const char *target =
+            strcmp(state->username, route->caller_username) == 0 ?
+            route->target :
+            route->caller_username;
+        struct session_state *client = find_client_by_username(target);
+
+        if (client == NULL || !is_active_session(client)) {
+            (void)send_textf(state, "ERR|call_relay");
+            return;
+        }
+
+        (void)send_textf(
+            client,
+            "CALL_RELAY|%s|%s|%lld|%lld|%s",
+            call_id,
+            state->username,
+            (long long)sequence_value,
+            (long long)server_now,
+            encrypted_frame
+        );
+    } else {
+        for (size_t i = 0; i < MAX_CLIENTS; ++i) {
+            struct session_state *client = clients[i];
+
+            if (client == NULL ||
+                client == state ||
+                !client->connected ||
+                !client->authenticated ||
+                !is_active_session(client) ||
+                strcmp(client->room, route->target) != 0) {
+                continue;
+            }
+
+            (void)send_textf(
+                client,
+                "CALL_RELAY|%s|%s|%lld|%lld|%s",
+                call_id,
+                state->username,
+                (long long)sequence_value,
+                (long long)server_now,
+                encrypted_frame
+            );
+        }
+    }
+
+    (void)insert_call_event(call_id, state->username, state->device_id, "relay_frame", "server_relay", NULL);
+    (void)send_textf(
+        state,
+        "OK|call_relay|%s|%lld|%lld",
+        call_id,
+        (long long)sequence_value,
+        (long long)server_now
+    );
+}
+
 static void handle_client_text(struct session_state *state, char *text) {
     char *cursor = text;
     char *command = next_field(&cursor);
 
     if (command == NULL) {
+        return;
+    }
+
+    if (strcmp(command, "HELLO") == 0) {
+        handle_hello(state, cursor);
         return;
     }
 
@@ -1010,6 +2360,26 @@ static void handle_client_text(struct session_state *state, char *text) {
 
     if (strcmp(command, "LOGIN") == 0) {
         handle_login(state, cursor);
+        return;
+    }
+
+    if (strcmp(command, "SESSION_REFRESH") == 0) {
+        handle_session_refresh(state, cursor);
+        return;
+    }
+
+    if (strcmp(command, "BACKUP_GET") == 0) {
+        if (cursor != NULL) {
+            (void)send_textf(state, "ERR|backup_get");
+            return;
+        }
+
+        handle_backup_get(state);
+        return;
+    }
+
+    if (strcmp(command, "BACKUP_PUT") == 0) {
+        handle_backup_put(state, cursor);
         return;
     }
 
@@ -1062,6 +2432,31 @@ static void handle_client_text(struct session_state *state, char *text) {
 
     if (strcmp(command, "DSIGNAL") == 0) {
         handle_direct_signal(state, cursor);
+        return;
+    }
+
+    if (strcmp(command, "CALL_INVITE") == 0) {
+        handle_call_invite(state, cursor);
+        return;
+    }
+
+    if (strcmp(command, "CALL_ACCEPT") == 0) {
+        handle_call_event_command(state, cursor, "call_accept", "accept");
+        return;
+    }
+
+    if (strcmp(command, "CALL_DECLINE") == 0) {
+        handle_call_event_command(state, cursor, "call_decline", "decline");
+        return;
+    }
+
+    if (strcmp(command, "CALL_END") == 0) {
+        handle_call_event_command(state, cursor, "call_end", "end");
+        return;
+    }
+
+    if (strcmp(command, "CALL_RELAY") == 0) {
+        handle_call_relay(state, cursor);
         return;
     }
 
@@ -1131,7 +2526,7 @@ static int anonchat_callback(
         }
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
-            if (state->closing) {
+            if (state->closing && state->out_count == 0) {
                 return -1;
             }
 
@@ -1164,6 +2559,8 @@ static int anonchat_callback(
 
             if (state->out_count > 0) {
                 lws_callback_on_writable(wsi);
+            } else if (state->closing) {
+                return -1;
             }
 
             return 0;

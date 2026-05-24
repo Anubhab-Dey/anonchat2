@@ -1,4 +1,4 @@
-const CACHE_NAME = "anonchat-static-v6";
+const CACHE_NAME = "anonchat-static-v7";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
@@ -6,7 +6,25 @@ const STATIC_ASSETS = [
   "/app.js",
   "/config.js",
   "/manifest.webmanifest",
-  "/icon.svg"
+  "/icon.svg",
+  "/modules/state.js",
+  "/modules/dom.js",
+  "/modules/toast.js",
+  "/modules/local-db.js",
+  "/modules/device-session.js",
+  "/modules/wire.js",
+  "/modules/auth.js",
+  "/modules/backup.js",
+  "/modules/crypto-box.js",
+  "/modules/conversations.js",
+  "/modules/rooms.js",
+  "/modules/direct.js",
+  "/modules/calls.js",
+  "/modules/call-p2p.js",
+  "/modules/call-relay.js",
+  "/modules/files.js",
+  "/modules/notifications.js",
+  "/modules/ui.js"
 ];
 
 self.addEventListener("install", (event) => {

@@ -34,6 +34,18 @@ body {
   overflow: hidden;
 }
 
+.app-banner {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid rgba(217, 179, 95, 0.45);
+  background: #271f10;
+  color: #ffe2a1;
+  font-size: 13px;
+  padding: 9px 14px;
+  text-align: center;
+}
+
 button,
 input,
 textarea {
@@ -341,6 +353,18 @@ h2 {
   font-size: 13px;
 }
 
+.file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.file-actions button {
+  min-height: 32px;
+  padding: 5px 10px;
+}
+
 .peer-top {
   display: flex;
   align-items: center;
@@ -470,6 +494,71 @@ a {
   color: var(--blue);
 }
 
+.toast-layer {
+  bottom: 18px;
+  display: grid;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 28px));
+  position: fixed;
+  right: 18px;
+  z-index: 50;
+}
+
+.toast {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #182028;
+  box-shadow: 0 12px 30px var(--shadow);
+  color: var(--text);
+  font-size: 13px;
+  padding: 10px 12px;
+}
+
+.toast.success {
+  border-color: rgba(65, 201, 143, 0.5);
+}
+
+.toast.warning {
+  border-color: rgba(217, 179, 95, 0.5);
+}
+
+.toast.error {
+  border-color: rgba(255, 111, 111, 0.5);
+}
+
+.blocking-screen {
+  align-items: center;
+  background: rgba(5, 8, 11, 0.76);
+  display: grid;
+  inset: 0;
+  justify-items: center;
+  padding: 18px;
+  position: fixed;
+  z-index: 60;
+}
+
+.blocking-screen[hidden] {
+  display: none;
+}
+
+.blocking-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 18px 42px var(--shadow);
+  display: grid;
+  gap: 14px;
+  max-width: 430px;
+  padding: 18px;
+  width: 100%;
+}
+
+.blocking-panel p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 @media (max-width: 1120px) {
   body {
     overflow: auto;
@@ -534,6 +623,13 @@ a {
 
   .message {
     max-width: 92%;
+  }
+
+  .toast-layer {
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    max-width: none;
   }
 }
 

@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="appBanner" class="app-banner" hidden></div>
     <main class="app-shell">
       <aside class="rail" aria-label="Account and rooms">
         <header class="brand">
@@ -128,7 +129,19 @@
       </aside>
     </main>
 
+    <div id="toastLayer" class="toast-layer" aria-live="polite"></div>
+    <section id="blockingScreen" class="blocking-screen" hidden>
+      <div class="blocking-panel">
+        <h2 id="blockingTitle">Sign in required</h2>
+        <p id="blockingText">Your local chats are still on this device.</p>
+        <div class="split-actions">
+          <button id="clearDeviceBtn" type="button">Clear this device</button>
+          <button id="signInAgainBtn" type="button">Sign in again</button>
+        </div>
+      </div>
+    </section>
+
     <script src="/config.js"></script>
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
