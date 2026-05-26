@@ -28,6 +28,7 @@ import {
   sendCallAccept,
   sendCallDecline,
 } from "./call-relay.js";
+import { ensureServerSessionReady } from "./device-session.js";
 
 const P2P_TIMEOUT_MS = 10000;
 
@@ -69,6 +70,15 @@ export function createCallSession(options) {
 }
 
 export async function startActiveCall() {
+  if (!state.authenticated) {
+    showToast("Sign in first", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
+    return;
+  }
+
   const conversation = activeConversation();
 
   if (conversation && conversation.kind === "dm") {
@@ -94,6 +104,10 @@ export async function startDirectCall(username = "") {
 
   if (clean.toLowerCase() === state.username.toLowerCase()) {
     showToast("Use someone else's username", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
     return;
   }
 
@@ -140,6 +154,10 @@ export async function startRoomCall(targetPeerId = null) {
 
   if (peerIds.length === 0) {
     showToast("No one else is here yet", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
     return;
   }
 
@@ -421,6 +439,10 @@ async function handleIncomingInvite(payload, fromUsername, serverNow, directPeer
 }
 
 async function acceptIncomingCall(callSession) {
+  if (!(await ensureServerSessionReady())) {
+    return;
+  }
+
   const media = await prepareCallMedia();
 
   if (!media.ok) {

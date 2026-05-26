@@ -173,6 +173,30 @@ export async function refreshSession() {
   return refreshInFlight;
 }
 
+export async function ensureServerSessionReady() {
+  if (state.authenticated && state.serverSessionReady) {
+    return true;
+  }
+
+  if (!state.session.sessionId || !state.session.sessionToken) {
+    return false;
+  }
+
+  setIdentity(state.username ? `${state.username} reconnecting` : "Reconnecting", "warn");
+  showToast("Reconnecting securely...", "info");
+  const refreshed = await refreshSession();
+
+  if (refreshed && state.authenticated && state.serverSessionReady) {
+    return true;
+  }
+
+  if (state.session.sessionId && state.session.sessionToken) {
+    showToast("Still reconnecting", "info");
+  }
+
+  return false;
+}
+
 async function performSessionRefresh(snapshot) {
   try {
     await sendHello();

@@ -6,6 +6,7 @@ import { sendWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { upsertConversation, openConversation, persistMessage, updateMessageStatus } from "./conversations.js";
 import { notifyIfSubscribed } from "./notifications.js";
+import { ensureServerSessionReady } from "./device-session.js";
 
 export async function setupDirectIdentity() {
   await ensureDirectIdentity();
@@ -112,6 +113,10 @@ export async function requestDirectPeer(username, options = {}) {
   const userVisible = options.userVisible === true;
 
   if (!clean || !state.authenticated) {
+    throw new Error("direct peer unavailable");
+  }
+
+  if (!state.serverSessionReady && !(await ensureServerSessionReady())) {
     throw new Error("direct peer unavailable");
   }
 
@@ -230,6 +235,10 @@ export async function startDirectConversation() {
     return;
   }
 
+  if (!(await ensureServerSessionReady())) {
+    return;
+  }
+
   const peer = await requestDirectPeer(username).catch(() => null);
   const conversation = await upsertConversation({
     id: directConversationId(username),
@@ -244,6 +253,15 @@ export async function startDirectConversation() {
 }
 
 export async function sendDirectChat(username, text) {
+  if (!state.authenticated) {
+    showToast("Sign in first", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
+    return;
+  }
+
   let peer = await getCachedDirectPeer(username);
 
   if (!peer) {
@@ -285,7 +303,9 @@ export async function sendDirectChat(username, text) {
   state.pendingAcks.dm.set(peer.username.toLowerCase(), pending);
   sendWire(`DM|${peer.username}|${payload}`);
   await updateMessageStatus(id, { client_sent_at: Date.now() });
-  requestDirectPeer(peer.username, { fresh: true }).catch(() => {});
+  if (state.serverSessionReady) {
+    requestDirectPeer(peer.username, { fresh: true }).catch(() => {});
+  }
   await upsertConversation({ ...conversation, preview: text, updatedAt: created }, { silent: true });
 }
 

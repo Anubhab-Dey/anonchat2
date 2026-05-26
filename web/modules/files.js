@@ -5,6 +5,7 @@ import { showToast } from "./toast.js";
 import { addSystemMessage } from "./ui.js";
 import { ensurePeerConnection, negotiate, peerLabel, renderPeers } from "./call-p2p.js";
 import { persistMessage } from "./conversations.js";
+import { ensureServerSessionReady } from "./device-session.js";
 
 const CHUNK_SIZE = 12000;
 let hashSelfCheckPromise = null;
@@ -45,6 +46,15 @@ export async function sendSelectedFile() {
 
   if (!file) {
     showToast("Choose a file first", "warning");
+    return;
+  }
+
+  if (!state.authenticated) {
+    showToast("Sign in first", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
     return;
   }
 

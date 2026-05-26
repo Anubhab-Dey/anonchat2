@@ -5,6 +5,7 @@ import { sendWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { upsertConversation, persistMessage, updateMessageStatus, setActiveConversationHeader, renderConversationHistory } from "./conversations.js";
 import { notifyIfSubscribed } from "./notifications.js";
+import { ensureServerSessionReady } from "./device-session.js";
 
 export function roomInviteUrl() {
   const room = cleanRoomName(els.room.value || "lobby");
@@ -75,6 +76,10 @@ export async function joinRoom() {
     return;
   }
 
+  if (!(await ensureServerSessionReady())) {
+    return;
+  }
+
   els.room.value = room;
   state.roomKeys = await deriveRoomKeys(room, secret);
   state.roomKey = state.roomKeys.chat;
@@ -140,8 +145,17 @@ export async function copyInvite() {
 }
 
 export async function sendRoomChat(text) {
+  if (!state.authenticated) {
+    showToast("Sign in first", "warning");
+    return;
+  }
+
   if (!state.room || !state.roomKey) {
     showToast("Enter a room first", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
     return;
   }
 

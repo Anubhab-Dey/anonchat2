@@ -7,6 +7,7 @@ import {
   loadSavedSession,
   refreshSession,
   initializeSessionCoordination,
+  ensureServerSessionReady,
   handleSessionRejected,
   handleSessionReplaced,
   clearThisDevice,
@@ -268,6 +269,10 @@ async function sendComposerMessage() {
 
   if (!state.authenticated) {
     showToast("Sign in first", "warning");
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
     return;
   }
 
