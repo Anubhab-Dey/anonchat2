@@ -1,7 +1,7 @@
 import { state, accountKeyForUsername, clearAccountRuntimeState, clearSessionOnly } from "./state.js";
 import { dbGet, dbPut, deleteLocalData } from "./local-db.js";
 import { enc, textToBase64Url, bytesToBase64Url, base64UrlToText } from "./crypto-box.js";
-import { sendAndWait, sendWire, stopReconnect, waitForWire } from "./wire.js";
+import { flushWireQueue, sendAndWait, sendWire, stopReconnect, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { showBlockingScreen, hideBlockingScreen, setIdentity } from "./ui.js";
 
@@ -93,6 +93,7 @@ export async function storeSessionFromAuth(parts) {
   }
 
   state.authenticated = true;
+  state.serverSessionReady = true;
   state.peerId = parts[2];
   state.username = nextUsername;
   state.session.deviceId = parts[4];
@@ -112,6 +113,7 @@ export async function storeSessionFromAuth(parts) {
   });
   resetRefreshFailures();
   broadcastSessionRefreshed();
+  flushWireQueue();
   hideBlockingScreen();
   setIdentity(state.username, "good");
   scheduleSessionRefresh();
@@ -125,6 +127,8 @@ export async function loadSavedSession() {
   }
 
   state.username = saved.username || "";
+  state.authenticated = true;
+  state.serverSessionReady = false;
   state.session.deviceId = saved.deviceId || "";
   state.session.sessionId = saved.sessionId || "";
   state.session.sessionToken = saved.sessionToken || "";
@@ -253,7 +257,13 @@ async function handleRefreshRejection(reason, snapshot) {
       return true;
     }
 
-    return confirmSessionInvalid("invalid");
+    state.sessionRefresh.confirmedInvalidCount++;
+
+    if (state.sessionRefresh.confirmedInvalidCount >= 3) {
+      return confirmSessionInvalid("invalid");
+    }
+
+    return handleTransientRefreshFailure();
   }
 
   if (reason === "expired" || reason === "revoked") {
@@ -362,6 +372,7 @@ async function applySessionRefresh(payload, options = {}) {
   }
 
   state.authenticated = true;
+  state.serverSessionReady = true;
   state.username = payload.username || state.username;
   state.session.deviceId = payload.deviceId || state.session.deviceId;
   state.session.sessionId = payload.sessionId;
@@ -370,6 +381,7 @@ async function applySessionRefresh(payload, options = {}) {
 
   await persistSessionSettings();
   resetRefreshFailures();
+  flushWireQueue();
   hideBlockingScreen();
   setIdentity(state.username, "good");
   scheduleSessionRefresh();
@@ -398,6 +410,7 @@ function resetRefreshFailures() {
   clearTimeout(state.sessionRefresh.retryTimer);
   state.sessionRefresh.inProgress = false;
   state.sessionRefresh.failureCount = 0;
+  state.sessionRefresh.confirmedInvalidCount = 0;
   state.sessionRefresh.lastFailureAt = 0;
   state.sessionRefresh.retryTimer = null;
 }

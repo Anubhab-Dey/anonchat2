@@ -26,6 +26,7 @@ export function turnRequiredForFallback() {
 export const state = {
   ws: null,
   authenticated: false,
+  serverSessionReady: false,
   reconnectEnabled: true,
   peerId: "",
   username: "",
@@ -56,6 +57,7 @@ export const state = {
   sessionRefresh: {
     inProgress: false,
     failureCount: 0,
+    confirmedInvalidCount: 0,
     lastFailureAt: 0,
     retryTimer: null,
   },
@@ -123,6 +125,7 @@ export function clearSessionOnly() {
   clearTimeout(state.refreshTimer);
   clearTimeout(state.sessionRefresh.retryTimer);
   state.authenticated = false;
+  state.serverSessionReady = false;
   state.session.deviceId = "";
   state.session.sessionId = "";
   state.session.sessionToken = "";
@@ -130,6 +133,7 @@ export function clearSessionOnly() {
   state.username = "";
   state.sessionRefresh.inProgress = false;
   state.sessionRefresh.failureCount = 0;
+  state.sessionRefresh.confirmedInvalidCount = 0;
   state.sessionRefresh.lastFailureAt = 0;
   state.sessionRefresh.retryTimer = null;
   clearAccountRuntimeState();

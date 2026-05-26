@@ -50,6 +50,7 @@ export function connect() {
   };
 
   state.ws.onclose = () => {
+    state.serverSessionReady = false;
     setStatus("Offline", "bad");
     notifyHandlers("CLOSE", []);
     scheduleReconnect();
@@ -72,6 +73,12 @@ export function stopReconnect() {
 }
 
 export function sendWire(text) {
+  if (shouldHoldForSession(text)) {
+    state.wireQueue.push(text);
+    connect();
+    return true;
+  }
+
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(text);
     return true;
@@ -87,9 +94,20 @@ export function flushWireQueue() {
     return;
   }
 
+  const remaining = [];
+
   while (state.wireQueue.length > 0) {
-    state.ws.send(state.wireQueue.shift());
+    const next = state.wireQueue.shift();
+
+    if (shouldHoldForSession(next)) {
+      remaining.push(next);
+      continue;
+    }
+
+    state.ws.send(next);
   }
+
+  state.wireQueue.unshift(...remaining);
 }
 
 export function waitForWire(predicate, timeout = 7000) {
@@ -143,3 +161,34 @@ function notifyHandlers(type, parts, raw = "") {
     });
   }
 }
+
+function shouldHoldForSession(text) {
+  const command = String(text || "").split("|", 1)[0];
+
+  if (!AUTHENTICATED_COMMANDS.has(command)) {
+    return false;
+  }
+
+  return Boolean(
+    state.session.sessionId &&
+    state.session.sessionToken &&
+    !state.serverSessionReady
+  );
+}
+
+const AUTHENTICATED_COMMANDS = new Set([
+  "JOIN",
+  "LEAVE",
+  "CHAT",
+  "SIGNAL",
+  "KEY",
+  "WHO",
+  "DM",
+  "DSIGNAL",
+  "BACKUP_GET",
+  "BACKUP_PUT",
+  "CALL_INVITE",
+  "CALL_ACCEPT",
+  "CALL_DECLINE",
+  "CALL_END",
+]);
