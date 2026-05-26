@@ -1,4 +1,4 @@
-import { state, cleanUsername } from "./state.js";
+import { state, accountKeyForUsername, cleanUsername, clearSessionOnly } from "./state.js";
 import { els } from "./dom.js";
 import { bytesToBase64Url, deriveBits, hasWebCrypto } from "./crypto-box.js";
 import { sendHello, storeSessionFromAuth } from "./device-session.js";
@@ -7,6 +7,8 @@ import { showToast } from "./toast.js";
 import { afterAuthBackupRestore, deriveAndStoreBackupKey } from "./backup.js";
 import { setupDirectIdentity } from "./direct.js";
 import { showBanner } from "./ui.js";
+import { loadConversations, resetConversationUi } from "./conversations.js";
+import { dbPut, migrateUnscopedLocalData } from "./local-db.js";
 
 export async function signup() {
   const username = cleanUsername(els.username.value);
@@ -54,17 +56,30 @@ export async function authenticate(command, username, password) {
     return;
   }
 
+  const previousLocalUsername = localStorage.getItem("anonchat.username") || "";
   await storeSessionFromAuth(parts);
   await deriveAndStoreBackupKey(username, password);
+  if (accountKeyForUsername(previousLocalUsername) === accountKeyForUsername(username)) {
+    await migrateUnscopedLocalData(accountKeyForUsername(username));
+  }
   await setupDirectIdentity();
   await afterAuthBackupRestore();
+  await loadConversations();
   showToast("Ready", "success");
 }
 
 export function logoutLocalOnly() {
-  state.authenticated = false;
-  state.session.sessionId = "";
-  state.session.sessionToken = "";
+  dbPut("settings", {
+    key: "session",
+    username: state.username,
+    deviceId: state.session.deviceId,
+    sessionId: "",
+    sessionToken: "",
+    expiresAt: 0,
+    backupVersion: state.session.backupVersion,
+  }).catch(() => {});
+  clearSessionOnly();
+  resetConversationUi();
   showToast("Signed out locally", "info");
 }
 

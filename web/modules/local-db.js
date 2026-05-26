@@ -1,4 +1,11 @@
-import { state } from "./state.js";
+import {
+  accountKeyForUsername,
+  accountSettingKey,
+  currentAccountKey,
+  scopedConversationId,
+  state,
+  unscopedConversationId,
+} from "./state.js";
 
 const DB_NAME = "anonchat-local-v1";
 const DB_VERSION = 2;
@@ -81,7 +88,21 @@ export async function dbGetAll(name) {
   return store ? dbRequest(store.getAll()) : [];
 }
 
+export async function dbGetAccountConversations(accountKey = currentAccountKey()) {
+  if (!accountKey) {
+    return [];
+  }
+
+  return (await dbGetAll("conversations")).filter((conversation) => conversation.account_key === accountKey);
+}
+
 export async function dbGetConversationMessages(conversationId) {
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    return [];
+  }
+
   const store = dbStore("messages");
 
   if (!store) {
@@ -89,16 +110,19 @@ export async function dbGetConversationMessages(conversationId) {
   }
 
   const index = store.index("byConversation");
-  const messages = await dbRequest(index.getAll(IDBKeyRange.only(conversationId)));
+  const messages = (await dbRequest(index.getAll(IDBKeyRange.only(conversationId))))
+    .filter((message) => message.account_key === accountKey);
   return messages.sort((a, b) => (a.client_created_at || a.at || 0) - (b.client_created_at || b.at || 0));
 }
 
 export async function exportBackupData(username) {
+  const accountKey = accountKeyForUsername(username);
+  const conversations = (await dbGetAll("conversations")).filter((item) => item.account_key === accountKey);
+  const messages = (await dbGetAll("messages")).filter((item) => item.account_key === accountKey);
   const settings = (await dbGetAll("settings")).filter((item) =>
     item.key &&
-    (item.key.startsWith("peer:") ||
-     item.key === "notifications" ||
-     item.key === `identity:${username.toLowerCase()}`)
+    item.account_key === accountKey &&
+    item.key.startsWith(`account:${accountKey}:peer:`)
   ).map((item) => {
     const clone = { ...item };
     delete clone.privateJwk;
@@ -109,9 +133,10 @@ export async function exportBackupData(username) {
   return {
     schema: 1,
     username,
+    account_key: accountKey,
     client_created_at: Date.now(),
-    conversations: await dbGetAll("conversations"),
-    messages: await dbGetAll("messages"),
+    conversations,
+    messages,
     settings,
   };
 }
@@ -121,17 +146,99 @@ export async function importBackupData(bundle) {
     throw new Error("unsupported backup");
   }
 
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    throw new Error("account required");
+  }
+
+  const idMap = new Map();
+
   for (const conversation of bundle.conversations || []) {
-    await dbPut("conversations", conversation);
+    const record = accountConversationRecord(conversation, accountKey);
+    idMap.set(conversation.id, record.id);
+    idMap.set(unscopedConversationId(conversation.id), record.id);
+    await dbPut("conversations", record);
   }
 
   for (const message of bundle.messages || []) {
-    await dbPut("messages", message);
+    const conversationId = idMap.get(message.conversationId) ||
+      scopedConversationId(unscopedConversationId(message.conversationId), accountKey);
+    await dbPut("messages", {
+      ...message,
+      conversationId,
+      account_key: accountKey,
+    });
   }
 
   for (const setting of bundle.settings || []) {
-    await dbPut("settings", setting);
+    if (!setting || !setting.key) {
+      continue;
+    }
+
+    const peerMatch = /peer:([^:]+)$/.exec(setting.key);
+
+    if (!peerMatch) {
+      continue;
+    }
+
+    await dbPut("settings", {
+      ...setting,
+      key: accountSettingKey(`peer:${peerMatch[1]}`, accountKey),
+      account_key: accountKey,
+    });
   }
+}
+
+export async function migrateUnscopedLocalData(accountKey) {
+  if (!accountKey) {
+    return;
+  }
+
+  const conversations = await dbGetAll("conversations");
+  const unscopedConversations = conversations.filter((item) => !item.account_key);
+
+  const idMap = new Map();
+
+  for (const conversation of unscopedConversations) {
+    const scoped = accountConversationRecord(conversation, accountKey);
+    idMap.set(conversation.id, scoped.id);
+    await dbPut("conversations", scoped);
+  }
+
+  const messages = (await dbGetAll("messages")).filter((item) => !item.account_key);
+
+  for (const message of messages) {
+    const conversationId = idMap.get(message.conversationId);
+
+    if (!conversationId) {
+      continue;
+    }
+
+    await dbPut("messages", {
+      ...message,
+      conversationId,
+      account_key: accountKey,
+    });
+  }
+
+  const settings = (await dbGetAll("settings")).filter((item) => item.key && item.key.startsWith("peer:"));
+
+  for (const setting of settings) {
+    await dbPut("settings", {
+      ...setting,
+      key: accountSettingKey(setting.key, accountKey),
+      account_key: accountKey,
+    });
+  }
+}
+
+function accountConversationRecord(conversation, accountKey) {
+  return {
+    ...conversation,
+    id: scopedConversationId(unscopedConversationId(conversation.id), accountKey),
+    account_key: accountKey,
+  };
 }
 
 export async function deleteLocalData() {

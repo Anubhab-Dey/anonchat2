@@ -1,4 +1,4 @@
-import { state, clearSessionOnly } from "./state.js";
+import { state, accountKeyForUsername, clearAccountRuntimeState, clearSessionOnly } from "./state.js";
 import { dbGet, dbPut, deleteLocalData } from "./local-db.js";
 import { enc, textToBase64Url, bytesToBase64Url, base64UrlToText } from "./crypto-box.js";
 import { sendAndWait, sendWire, stopReconnect, waitForWire } from "./wire.js";
@@ -43,9 +43,18 @@ export async function sendHello() {
 }
 
 export async function storeSessionFromAuth(parts) {
+  const nextUsername = parts[3] || "";
+  const previousAccount = accountKeyForUsername(state.username || "");
+  const nextAccount = accountKeyForUsername(nextUsername);
+
+  if (previousAccount && nextAccount && previousAccount !== nextAccount) {
+    clearAccountRuntimeState();
+    window.dispatchEvent(new Event("anonchat:account-cleared"));
+  }
+
   state.authenticated = true;
   state.peerId = parts[2];
-  state.username = parts[3];
+  state.username = nextUsername;
   state.session.deviceId = parts[4];
   state.session.sessionId = parts[5];
   state.session.sessionToken = parts[6];
@@ -144,7 +153,17 @@ export async function refreshSession() {
     scheduleSessionRefresh();
     return true;
   } catch {
+    await dbPut("settings", {
+      key: "session",
+      username: state.username,
+      deviceId: state.session.deviceId,
+      sessionId: "",
+      sessionToken: "",
+      expiresAt: 0,
+      backupVersion: state.session.backupVersion,
+    }).catch(() => {});
     clearSessionOnly();
+    window.dispatchEvent(new Event("anonchat:account-cleared"));
     setIdentity("Sign in needed", "warn");
     showToast("Please sign in again", "warning");
     return false;
@@ -177,6 +196,7 @@ export async function handleSessionReplaced(newDeviceId) {
     replacedBy: newDeviceId,
   });
   clearSessionOnly();
+  window.dispatchEvent(new Event("anonchat:account-cleared"));
   showToast("Account is active on another device", "warning");
   showBlockingScreen("Use this device?", "Your chats are still saved here. Sign in to make this the active device, or clear only this device.");
 }

@@ -6,11 +6,12 @@ import { rememberDirectPeer, requestDirectPeer } from "./direct.js";
 import { upsertConversation, openConversation } from "./conversations.js";
 import { directConversationId } from "./state.js";
 import {
-  ensureLocalMedia,
+  prepareCallMedia,
   ensurePeerConnection,
   createRelayPeerConnection,
   addLocalTracksTo,
   negotiate,
+  resumePendingRemoteOffer,
   stopP2PMedia,
   setPeerCallHandler,
 } from "./call-p2p.js";
@@ -54,6 +55,7 @@ export function createCallSession(options) {
     fallbackTimer: null,
     peerIds: Array.isArray(options.peerIds) ? options.peerIds : [],
     incoming: Boolean(options.incoming),
+    media_mode: options.media_mode || null,
   };
   state.calls.sessions.set(session.call_id, session);
   state.calls.active = session;
@@ -89,6 +91,12 @@ export async function startDirectCall(username = "") {
     return;
   }
 
+  const media = await prepareCallMedia();
+
+  if (!media.ok) {
+    return;
+  }
+
   const peer = await requestDirectPeer(clean, { fresh: true });
   const conversation = await upsertConversation({
     id: directConversationId(peer.username),
@@ -107,8 +115,9 @@ export async function startDirectCall(username = "") {
     target: peer.username,
     peerId: peer.peerId,
     peerPublicWire: peer.publicWire,
+    media_mode: media.mediaMode,
   });
-  await startP2PAttempt(session);
+  await startP2PAttempt(session, null, { mediaPrepared: true });
 }
 
 export async function startRoomCall(targetPeerId = null) {
@@ -128,25 +137,36 @@ export async function startRoomCall(targetPeerId = null) {
     return;
   }
 
+  const media = await prepareCallMedia();
+
+  if (!media.ok) {
+    return;
+  }
+
   const session = createCallSession({
     call_kind: "room",
     room: state.room,
     target: state.room,
     roomSecret: state.pendingRoomSecret || els.roomKey.value,
     peerId: targetPeerId,
+    media_mode: media.mediaMode,
   });
-  await startP2PAttempt(session, peerIds);
+  await startP2PAttempt(session, peerIds, { mediaPrepared: true });
 }
 
 export async function startP2PAttempt(callSession, roomPeerIds = null, options = {}) {
   const shouldSendInvite = options.sendInvite !== false;
-  const ok = await ensureLocalMedia();
+  const media = options.mediaPrepared && state.localStream ?
+    { ok: true, mediaMode: callSession.media_mode || "audio_video" } :
+    await prepareCallMedia();
 
-  if (!ok) {
+  if (!media.ok) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     return;
   }
+
+  callSession.media_mode = media.mediaMode;
 
   callSession.call_state = "connecting_p2p";
   callSession.p2p_started_at = Date.now();
@@ -207,13 +227,15 @@ export async function startRelayFallback(callSession) {
     return;
   }
 
-  const ok = await ensureLocalMedia();
+  const media = await prepareCallMedia();
 
-  if (!ok) {
+  if (!media.ok) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     return;
   }
+
+  callSession.media_mode = media.mediaMode;
 
   callSession.call_state = "connecting_relay";
   callSession.relay_started_at = Date.now();
@@ -385,7 +407,16 @@ async function handleIncomingInvite(payload, fromUsername, serverNow, directPeer
 }
 
 async function acceptIncomingCall(callSession) {
+  const media = await prepareCallMedia();
+
+  if (!media.ok) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    return;
+  }
+
   hideIncomingCall();
+  callSession.media_mode = media.mediaMode;
   callSession.call_state = "connecting_p2p";
 
   if (callSession.call_kind === "direct" && (!callSession.peerId || !callSession.peerPublicWire)) {
@@ -397,7 +428,18 @@ async function acceptIncomingCall(callSession) {
 
   await sendCallAccept(callSession).catch(() => {});
   const peers = callSession.call_kind === "room" ? [...state.peers.keys()] : null;
-  await startP2PAttempt(callSession, peers, { sendInvite: false });
+  const pendingPeers = callSession.call_kind === "room" ? peers : [callSession.peerId].filter(Boolean);
+  let resumed = false;
+
+  for (const peerId of pendingPeers) {
+    resumed = await resumePendingRemoteOffer(peerId) || resumed;
+  }
+
+  if (resumed && callSession.call_kind === "direct") {
+    return;
+  }
+
+  await startP2PAttempt(callSession, peers, { sendInvite: false, mediaPrepared: true });
 }
 
 async function declineIncomingCall(callSession) {

@@ -1,4 +1,4 @@
-import { state } from "./state.js";
+import { state, accountKeyForUsername, accountSettingKey, currentAccountKey } from "./state.js";
 import { exportBackupData, importBackupData, dbGet, dbPut } from "./local-db.js";
 import { deriveBits, bytesToBase64Url, base64UrlToBytes, encryptJson, decryptJson } from "./crypto-box.js";
 import { sendWire, waitForWire } from "./wire.js";
@@ -100,12 +100,14 @@ export async function uploadBackupIfDirty() {
 }
 
 export async function deriveAndStoreBackupKey(username, password) {
-  const bits = await deriveBits(password, `anonchat-backup:${username.toLowerCase()}`);
+  const accountKey = accountKeyForUsername(username);
+  const bits = await deriveBits(password, `anonchat-backup:${accountKey}`);
   const key = await importBackupKey(bits);
   state.backupKey = key;
   state.backupLocked = false;
   await dbPut("settings", {
-    key: `backup_key:${username.toLowerCase()}`,
+    key: accountSettingKey("backup_key", accountKey),
+    account_key: accountKey,
     alg: "PBKDF2-SHA256-AESGCM-256",
     bits: bytesToBase64Url(bits),
     updatedAt: Date.now(),
@@ -131,15 +133,15 @@ async function backupKey() {
 }
 
 async function loadStoredBackupKey() {
-  const username = (state.username || "").toLowerCase();
+  const accountKey = currentAccountKey();
 
-  if (!username) {
+  if (!accountKey) {
     return null;
   }
 
-  const saved = await dbGet("settings", `backup_key:${username}`);
+  const saved = await dbGet("settings", accountSettingKey("backup_key", accountKey));
 
-  if (!saved || !saved.bits) {
+  if (!saved || saved.account_key !== accountKey || !saved.bits) {
     return null;
   }
 
@@ -151,8 +153,15 @@ async function importBackupKey(bits) {
 }
 
 async function persistBackupSettings(dirty) {
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    return;
+  }
+
   await dbPut("settings", {
-    key: "backup",
+    key: accountSettingKey("backup", accountKey),
+    account_key: accountKey,
     version: state.session.backupVersion,
     dirty,
   });

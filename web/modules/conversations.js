@@ -1,10 +1,10 @@
-import { state, activeConversation, roomConversationId, directConversationId } from "./state.js";
+import { state, activeConversation, currentAccountKey, roomConversationId, directConversationId, scopedConversationId, unscopedConversationId } from "./state.js";
 import { els, addMessageNode, clearMessages } from "./dom.js";
-import { dbGet, dbGetAll, dbPut, dbGetConversationMessages } from "./local-db.js";
+import { dbGet, dbGetAll, dbPut, dbGetAccountConversations, dbGetConversationMessages } from "./local-db.js";
 import { markBackupDirty } from "./backup.js";
 
 export async function loadConversations() {
-  const conversations = await dbGetAll("conversations");
+  const conversations = await dbGetAccountConversations();
   state.conversations.clear();
 
   for (const conversation of conversations) {
@@ -15,10 +15,19 @@ export async function loadConversations() {
 }
 
 export async function upsertConversation(next, options = {}) {
-  const current = state.conversations.get(next.id) || {};
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    throw new Error("account required");
+  }
+
+  const id = scopedConversationId(unscopedConversationId(next.id), accountKey);
+  const current = state.conversations.get(id) || {};
   const conversation = {
     ...current,
     ...next,
+    id,
+    account_key: accountKey,
     updatedAt: next.updatedAt || current.updatedAt || Date.now(),
   };
   state.conversations.set(conversation.id, conversation);
@@ -33,10 +42,18 @@ export async function upsertConversation(next, options = {}) {
 }
 
 export async function persistMessage(conversationId, message, options = {}) {
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    throw new Error("account required");
+  }
+
+  const scopedId = scopedConversationId(unscopedConversationId(conversationId), accountKey);
   const now = Date.now();
   const record = {
     id: message.id || crypto.randomUUID(),
-    conversationId,
+    conversationId: scopedId,
+    account_key: accountKey,
     direction: message.direction,
     sender: message.sender || "",
     text: message.text || "",
@@ -50,7 +67,7 @@ export async function persistMessage(conversationId, message, options = {}) {
   };
   await dbPut("messages", record);
 
-  const conversation = state.conversations.get(conversationId);
+  const conversation = state.conversations.get(scopedId);
 
   if (conversation) {
     conversation.preview = record.file ? `File: ${record.file.name}` : record.text;
@@ -62,7 +79,7 @@ export async function persistMessage(conversationId, message, options = {}) {
     markBackupDirty();
   }
 
-  if (!options.noRender && state.activeConversationId === conversationId) {
+  if (!options.noRender && state.activeConversationId === scopedId) {
     addMessageNode(
       record.file ? `File ready: ${record.file.name}` : record.text,
       record.direction === "out" ? "local" : "",
@@ -75,8 +92,14 @@ export async function persistMessage(conversationId, message, options = {}) {
 }
 
 export async function updateMessageStatus(messageId, patch) {
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    return;
+  }
+
   const messages = await dbGetAll("messages");
-  const message = messages.find((item) => item.id === messageId);
+  const message = messages.find((item) => item.id === messageId && item.account_key === accountKey);
 
   if (!message) {
     return;
@@ -92,6 +115,16 @@ export async function updateMessageStatus(messageId, patch) {
 
 export function renderConversations() {
   els.conversations.textContent = "";
+  const accountKey = currentAccountKey();
+
+  if (!accountKey) {
+    const empty = document.createElement("div");
+    empty.className = "conversation-item";
+    empty.innerHTML = "<span class=\"conversation-preview\">Sign in to see chats saved for this account.</span>";
+    els.conversations.appendChild(empty);
+    return;
+  }
+
   const conversations = [...state.conversations.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   for (const conversation of conversations) {
@@ -167,9 +200,11 @@ export async function renameConversation(conversationId) {
 }
 
 export async function openConversation(conversationId, options = {}) {
-  const conversation = state.conversations.get(conversationId) || await dbGet("conversations", conversationId);
+  const accountKey = currentAccountKey();
+  const scopedId = scopedConversationId(unscopedConversationId(conversationId), accountKey);
+  const conversation = state.conversations.get(scopedId) || await dbGet("conversations", scopedId);
 
-  if (!conversation) {
+  if (!accountKey || !conversation || conversation.account_key !== accountKey) {
     return;
   }
 
@@ -192,7 +227,7 @@ export async function openConversation(conversationId, options = {}) {
 
 export async function renderConversationHistory(conversationId) {
   clearMessages();
-  const messages = await dbGetConversationMessages(conversationId);
+  const messages = await dbGetConversationMessages(scopedConversationId(unscopedConversationId(conversationId)));
 
   for (const message of messages) {
     addMessageNode(
@@ -212,6 +247,14 @@ export function setActiveConversationHeader(conversation) {
 
   els.conversationKind.textContent = conversation.kind === "dm" ? "Direct message" : "Room";
   els.roomTitle.textContent = conversation.title || conversation.room || conversation.username || conversation.id;
+}
+
+export function resetConversationUi() {
+  state.activeConversationId = "";
+  state.conversations.clear();
+  clearMessages();
+  renderConversations();
+  setActiveConversationHeader(null);
 }
 
 export function currentConversation() {

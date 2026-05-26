@@ -1,4 +1,4 @@
-import { state, cleanRoomName, roomConversationId } from "./state.js";
+import { state, cleanRoomName, currentAccountKey, roomConversationId } from "./state.js";
 import { els } from "./dom.js";
 import { randomKey, derivePbkdf2Key, encryptJson, decryptJson } from "./crypto-box.js";
 import { sendWire } from "./wire.js";
@@ -27,7 +27,7 @@ export function loadInitialRoomInputs() {
   const params = new URLSearchParams(location.hash.slice(1));
   const invitedRoom = params.get("room");
   const invitedKey = params.get("key");
-  const savedRoom = localStorage.getItem("anonchat.room");
+  const savedRoom = localStorage.getItem(roomStorageKey());
 
   if (invitedRoom) {
     els.room.value = cleanRoomName(invitedRoom);
@@ -86,7 +86,11 @@ export async function handleRoomJoined(room, peerId) {
   state.room = room;
   state.peerId = peerId;
   state.peers.clear();
-  localStorage.setItem("anonchat.room", room);
+  const storageKey = roomStorageKey();
+
+  if (storageKey) {
+    localStorage.setItem(storageKey, room);
+  }
   const conversation = await upsertConversation({
     id: roomConversationId(room),
     kind: "room",
@@ -203,4 +207,9 @@ export async function openRoomFromConversation(event) {
   if (join && state.authenticated && conversation.roomKey) {
     await joinRoom();
   }
+}
+
+function roomStorageKey() {
+  const accountKey = currentAccountKey();
+  return accountKey ? `anonchat.room.${accountKey}` : "";
 }

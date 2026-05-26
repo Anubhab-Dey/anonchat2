@@ -1,4 +1,4 @@
-import { state, cleanUsername, directConversationId } from "./state.js";
+import { state, accountSettingKey, cleanUsername, currentAccountKey, directConversationId } from "./state.js";
 import { els } from "./dom.js";
 import { base64UrlToText, textToBase64Url, encryptJson, decryptJson } from "./crypto-box.js";
 import { dbGet, dbPut } from "./local-db.js";
@@ -13,7 +13,13 @@ export async function setupDirectIdentity() {
 }
 
 export async function ensureDirectIdentity() {
-  let saved = await dbGet("settings", "direct_identity");
+  const key = accountSettingKey("direct_identity");
+
+  if (!key) {
+    throw new Error("account required for direct identity");
+  }
+
+  let saved = await dbGet("settings", key);
 
   if (!saved) {
     const keyPair = await crypto.subtle.generateKey(
@@ -22,7 +28,8 @@ export async function ensureDirectIdentity() {
       ["deriveKey"]
     );
     saved = {
-      key: "direct_identity",
+      key,
+      account_key: currentAccountKey(),
       kind: "direct-ecdh-v1",
       publicJwk: await crypto.subtle.exportKey("jwk", keyPair.publicKey),
       privateJwk: await crypto.subtle.exportKey("jwk", keyPair.privateKey),
@@ -41,8 +48,9 @@ export async function ensureDirectIdentity() {
 
 export function rememberDirectPeer(username, peerId, publicWire) {
   const clean = cleanUsername(username);
+  const accountKey = currentAccountKey();
 
-  if (!clean || !publicWire) {
+  if (!accountKey || !clean || !publicWire) {
     return;
   }
 
@@ -53,56 +61,142 @@ export function rememberDirectPeer(username, peerId, publicWire) {
     showToast(`${clean}'s device key changed`, "warning");
   }
 
-  const peer = { username: clean, peerId, publicWire, updatedAt: Date.now() };
+  const peer = { username: clean, peerId, publicWire, account_key: accountKey, updatedAt: Date.now() };
   state.directPeers.set(id, peer);
   state.directPeerIds.set(peerId, clean);
-  dbPut("settings", { key: `peer:${id}`, ...peer }).catch(() => {});
+  dbPut("settings", { key: accountSettingKey(`peer:${id}`, accountKey), ...peer }).catch(() => {});
 
   const waiters = state.directWaiters.get(id) || [];
   state.directWaiters.delete(id);
 
   for (const waiter of waiters) {
+    clearTimeout(waiter.timer);
     waiter.resolve(peer);
   }
+}
+
+export async function getCachedDirectPeer(username) {
+  const clean = cleanUsername(username);
+  const accountKey = currentAccountKey();
+
+  if (!clean || !accountKey) {
+    return null;
+  }
+
+  const id = clean.toLowerCase();
+  const cached = state.directPeers.get(id);
+
+  if (cached && cached.publicWire && cached.account_key === accountKey) {
+    return cached;
+  }
+
+  const saved = await dbGet("settings", accountSettingKey(`peer:${id}`, accountKey));
+
+  if (!saved || !saved.publicWire || saved.account_key !== accountKey) {
+    return null;
+  }
+
+  state.directPeers.set(id, saved);
+
+  if (saved.peerId) {
+    state.directPeerIds.set(saved.peerId, saved.username || clean);
+  }
+
+  return saved;
 }
 
 export async function requestDirectPeer(username, options = {}) {
   const clean = cleanUsername(username);
   const id = clean.toLowerCase();
   const fresh = options.fresh === true;
+  const userVisible = options.userVisible === true;
 
   if (!clean || !state.authenticated) {
     throw new Error("direct peer unavailable");
   }
 
-  const cached = state.directPeers.get(id);
+  const cached = await getCachedDirectPeer(clean);
 
   if (cached && !fresh) {
     sendWire(`WHO|${clean}`);
     return cached;
   }
 
-  const saved = await dbGet("settings", `peer:${id}`);
-
-  if (saved && saved.publicWire && !fresh) {
-    state.directPeers.set(id, saved);
-    sendWire(`WHO|${clean}`);
-    return saved;
-  }
-
   sendWire(`WHO|${clean}`);
   return new Promise((resolve, reject) => {
     const waiters = state.directWaiters.get(id) || [];
-    const waiter = { resolve, reject };
+    const waiter = { resolve, reject, userVisible, username: clean, timer: null };
     waiters.push(waiter);
     state.directWaiters.set(id, waiters);
 
-    setTimeout(() => {
+    waiter.timer = setTimeout(() => {
       const current = state.directWaiters.get(id) || [];
       state.directWaiters.set(id, current.filter((item) => item !== waiter));
-      reject(new Error("user is not online or has no key yet"));
+      if (userVisible) {
+        reject(new Error("direct user unavailable"));
+      } else {
+        resolve(null);
+      }
     }, 5000);
   });
+}
+
+export function handleDirectUserRejected(parts) {
+  const username = cleanUsername(parts[2] || "");
+
+  if (!username) {
+    clearAllUserVisibleDirectWaiters();
+    return true;
+  }
+
+  const id = username.toLowerCase();
+  const waiters = state.directWaiters.get(id) || [];
+
+  if (waiters.length === 0) {
+    return true;
+  }
+
+  state.directWaiters.delete(id);
+
+  for (const waiter of waiters) {
+    clearTimeout(waiter.timer);
+
+    if (waiter.userVisible) {
+      waiter.reject(new Error("direct user unavailable"));
+    } else {
+      waiter.resolve(null);
+    }
+  }
+
+  return true;
+}
+
+export async function handleDirectDeliveryFailed(parts) {
+  const username = cleanUsername(parts[2] || "");
+  const id = username.toLowerCase();
+  let messageId = null;
+
+  if (id && state.pendingAcks.dm.has(id)) {
+    const pending = state.pendingAcks.dm.get(id) || [];
+    messageId = pending.shift() || null;
+    state.pendingAcks.dm.set(id, pending);
+  }
+
+  if (!messageId) {
+    for (const pending of state.pendingAcks.dm.values()) {
+      messageId = pending.shift() || null;
+
+      if (messageId) {
+        break;
+      }
+    }
+  }
+
+  if (messageId) {
+    await updateMessageStatus(messageId, { status: "failed" });
+  }
+
+  showToast(username ? `${username} is offline` : "Message could not be delivered", "warning");
 }
 
 export async function deriveDirectKey(publicWire) {
@@ -150,10 +244,33 @@ export async function startDirectConversation() {
 }
 
 export async function sendDirectChat(username, text) {
-  const peer = await requestDirectPeer(username, { fresh: true });
+  let peer = await getCachedDirectPeer(username);
+
+  if (!peer) {
+    try {
+      peer = await requestDirectPeer(username, { fresh: true, userVisible: true });
+    } catch {
+      showToast("User is not online yet", "warning");
+      return;
+    }
+  }
+
+  if (!peer || !peer.publicWire) {
+    showToast("Direct user unavailable", "warning");
+    return;
+  }
+
   const key = await deriveDirectKey(peer.publicWire);
   const id = crypto.randomUUID();
   const created = Date.now();
+  const conversation = await upsertConversation({
+    id: directConversationId(peer.username),
+    kind: "dm",
+    title: peer.username,
+    username: peer.username,
+    peerPublicKey: peer.publicWire,
+    updatedAt: created,
+  }, { silent: true });
   await persistMessage(directConversationId(peer.username), {
     id,
     direction: "out",
@@ -168,6 +285,8 @@ export async function sendDirectChat(username, text) {
   state.pendingAcks.dm.set(peer.username.toLowerCase(), pending);
   sendWire(`DM|${peer.username}|${payload}`);
   await updateMessageStatus(id, { client_sent_at: Date.now() });
+  requestDirectPeer(peer.username, { fresh: true }).catch(() => {});
+  await upsertConversation({ ...conversation, preview: text, updatedAt: created }, { silent: true });
 }
 
 export async function handleDirectAck(targetUsername, serverSentAt) {
@@ -217,4 +336,26 @@ export async function encryptDirectSignal(username, publicWire, value) {
 export async function decryptDirectSignal(publicWire, payload) {
   const key = await deriveDirectKey(publicWire);
   return decryptJson(key, payload);
+}
+
+function clearAllUserVisibleDirectWaiters() {
+  for (const [id, waiters] of state.directWaiters.entries()) {
+    const remaining = [];
+
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+
+      if (waiter.userVisible) {
+        waiter.reject(new Error("direct user unavailable"));
+      } else {
+        remaining.push(waiter);
+      }
+    }
+
+    if (remaining.length > 0) {
+      state.directWaiters.set(id, remaining);
+    } else {
+      state.directWaiters.delete(id);
+    }
+  }
 }

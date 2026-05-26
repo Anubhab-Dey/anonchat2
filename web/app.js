@@ -1,6 +1,6 @@
-import { state, activeConversation } from "./modules/state.js";
+import { state, activeConversation, accountKeyForUsername, accountSettingKey, clearSessionOnly } from "./modules/state.js";
 import { els } from "./modules/dom.js";
-import { openLocalDb, dbGet } from "./modules/local-db.js";
+import { openLocalDb, dbGet, dbPut } from "./modules/local-db.js";
 import { connect, onWire, setStatus } from "./modules/wire.js";
 import { signup, login } from "./modules/auth.js";
 import {
@@ -15,6 +15,7 @@ import {
   loadConversations,
   openConversation,
   currentConversation,
+  resetConversationUi,
 } from "./modules/conversations.js";
 import {
   loadInitialRoomInputs,
@@ -34,6 +35,8 @@ import {
   sendDirectChat,
   handleDirectAck,
   handleDirectMessage,
+  handleDirectDeliveryFailed,
+  handleDirectUserRejected,
   rememberDirectPeer,
 } from "./modules/direct.js";
 import {
@@ -143,6 +146,9 @@ function bindEvents() {
   window.addEventListener("anonchat:backup-imported", () => {
     loadConversations().catch(() => {});
   });
+  window.addEventListener("anonchat:account-cleared", () => {
+    resetConversationUi();
+  });
 }
 
 function bindProtocol() {
@@ -162,6 +168,7 @@ function bindProtocol() {
       if (refreshed) {
         setIdentity(state.username, "good");
         await setupDirectIdentity();
+        await loadConversations();
         await uploadBackupIfDirty();
       }
     } finally {
@@ -198,11 +205,32 @@ function bindProtocol() {
     const reason = parts[1] || "request";
 
     if (reason === "session") {
+      dbPut("settings", {
+        key: "session",
+        username: state.username,
+        deviceId: state.session.deviceId,
+        sessionId: "",
+        sessionToken: "",
+        expiresAt: 0,
+        backupVersion: state.session.backupVersion,
+      }).catch(() => {});
+      clearSessionOnly();
+      resetConversationUi();
       showBlockingScreen("Sign in needed", "Your chats are still saved here. Sign in to keep using this device.");
       return;
     }
 
-    showToast(`Server rejected ${reason}`, "warning");
+    if (reason === "user") {
+      handleDirectUserRejected(parts);
+      return;
+    }
+
+    if (reason === "dm") {
+      handleDirectDeliveryFailed(parts).catch(() => {});
+      return;
+    }
+
+    showToast("Request could not be completed", "warning");
   });
 
   onWire("SESSION_REPLACED", (parts) => {
@@ -272,7 +300,8 @@ async function restoreLocalSessionSummary() {
 
   els.username.value = saved.username || "";
   setIdentity(`${saved.username} saved`, "warn");
-  const backup = await dbGet("settings", "backup");
+  const accountKey = accountKeyForUsername(saved.username || "");
+  const backup = accountKey ? await dbGet("settings", accountSettingKey("backup", accountKey)) : null;
 
   if (backup && backup.dirty) {
     state.backupDirty = true;

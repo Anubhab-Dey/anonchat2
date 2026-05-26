@@ -54,6 +54,7 @@ function createPeerConnection(peerId, options = {}) {
   pc._ignoreOffer = false;
   pc._isSettingRemoteAnswerPending = false;
   pc._pendingCandidates = [];
+  pc._pendingRemoteOffer = null;
   updatePeerConnectionMode(pc, options);
 
   pc.onnegotiationneeded = async () => {
@@ -211,10 +212,12 @@ async function handleRtcSignal(peerId, pc, signal) {
       return;
     }
 
-    if (description.type === "offer" && !state.localStream) {
+    if (description.type === "offer" && shouldHoldIncomingOffer(peerId)) {
+      pc._pendingRemoteOffer = signal;
       addSystemMessage(`incoming call from ${peerLabel(peerId)}`);
       setCallStatus(`Incoming from ${peerLabel(peerId)}`, "warn");
       await notifyIfSubscribed("Incoming call", peerLabel(peerId), `call:${peerId}`);
+      return;
     }
 
     pc._isSettingRemoteAnswerPending = description.type === "answer";
@@ -250,6 +253,19 @@ async function handleRtcSignal(peerId, pc, signal) {
   }
 }
 
+export async function resumePendingRemoteOffer(peerId) {
+  const pc = state.pcs.get(peerId);
+
+  if (!pc || !pc._pendingRemoteOffer || !state.localStream) {
+    return false;
+  }
+
+  const signal = pc._pendingRemoteOffer;
+  pc._pendingRemoteOffer = null;
+  await handleRtcSignal(peerId, pc, signal);
+  return true;
+}
+
 export function peerLabel(peerId) {
   const peer = state.peers.get(peerId);
   return peer ? peer.username : state.directPeerIds.get(peerId) || peerId;
@@ -283,35 +299,108 @@ function attachRemoteStream(peerId, stream) {
   video.srcObject = stream;
 }
 
-export async function ensureLocalMedia() {
-  if (state.localStream) {
-    return true;
+export async function prepareCallMedia() {
+  if (hasUsableAudio(state.localStream)) {
+    attachLocalPreview(state.localStream);
+    return {
+      ok: true,
+      stream: state.localStream,
+      mediaMode: hasUsableVideo(state.localStream) ? "audio_video" : "audio_only",
+      reason: null,
+    };
   }
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    addSystemMessage("camera and microphone need HTTPS or localhost");
-    setCallStatus("Camera/mic unavailable", "bad");
-    return false;
+    addSystemMessage("microphone needs HTTPS or localhost");
+    setCallStatus("Media unavailable", "bad");
+    showToast("Microphone unavailable", "error");
+    return { ok: false, stream: null, mediaMode: null, reason: "media_devices_unavailable" };
   }
 
-  setCallStatus("Requesting permission", "warn");
+  setCallStatus("Allow microphone and camera", "warn");
 
   try {
-    state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    els.localVideo.srcObject = state.localStream;
-    return true;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    state.localStream = stream;
+    attachLocalPreview(stream);
+    setCallStatus("Connecting securely...", "warn");
+    return { ok: true, stream, mediaMode: "audio_video", reason: null };
   } catch (error) {
-    if (error && (error.name === "NotAllowedError" || error.name === "PermissionDeniedError")) {
-      addSystemMessage("camera or microphone is blocked; allow it in browser site settings");
-    } else if (error && error.name === "NotFoundError") {
-      addSystemMessage("no camera or microphone was found");
-    } else {
-      addSystemMessage("camera or microphone could not be opened");
+    if (!shouldRetryAudioOnly(error)) {
+      return failCallMedia(error);
     }
-
-    setCallStatus("Camera/mic blocked", "bad");
-    return false;
   }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    state.localStream = stream;
+    attachLocalPreview(stream);
+    showToast("Audio-only call", "info");
+    setCallStatus("Audio-only call", "warn");
+    return { ok: true, stream, mediaMode: "audio_only", reason: null };
+  } catch (error) {
+    return failCallMedia(error);
+  }
+}
+
+function shouldHoldIncomingOffer(peerId) {
+  const activeCall = state.calls.active;
+
+  if (!state.localStream) {
+    return true;
+  }
+
+  return Boolean(
+    activeCall &&
+    activeCall.incoming &&
+    activeCall.call_state === "ringing" &&
+    (!activeCall.peerId || activeCall.peerId === peerId)
+  );
+}
+
+export async function ensureLocalMedia() {
+  return (await prepareCallMedia()).ok;
+}
+
+function attachLocalPreview(stream) {
+  if (!els.localVideo) {
+    return;
+  }
+
+  els.localVideo.srcObject = hasUsableVideo(stream) ? stream : null;
+}
+
+function hasUsableAudio(stream) {
+  return Boolean(stream && stream.getAudioTracks().some((track) => track.readyState === "live"));
+}
+
+function hasUsableVideo(stream) {
+  return Boolean(stream && stream.getVideoTracks().some((track) => track.readyState === "live"));
+}
+
+function shouldRetryAudioOnly(error) {
+  const name = error && error.name;
+  return name === "NotFoundError" ||
+    name === "OverconstrainedError" ||
+    name === "DevicesNotFoundError" ||
+    name === "NotReadableError" ||
+    name === "TrackStartError";
+}
+
+function failCallMedia(error) {
+  const name = error && error.name;
+
+  if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
+    addSystemMessage("microphone permission is blocked");
+    showToast("Call permission denied", "error");
+    setCallStatus("Media blocked", "bad");
+    return { ok: false, stream: null, mediaMode: null, reason: "permission_denied" };
+  }
+
+  addSystemMessage("microphone unavailable");
+  showToast("Microphone unavailable", "error");
+  setCallStatus("Media unavailable", "bad");
+  return { ok: false, stream: null, mediaMode: null, reason: "microphone_unavailable" };
 }
 
 export function closePeer(peerId) {

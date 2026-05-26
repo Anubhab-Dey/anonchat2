@@ -2538,7 +2538,7 @@ static void handle_user_lookup(
     struct session_state *target = find_client_by_username(username);
 
     if (target == NULL || target->public_key[0] == '\0') {
-        (void)send_textf(state, "ERR|user");
+        (void)send_textf(state, "ERR|user|%s", username);
         return;
     }
 
@@ -2574,8 +2574,8 @@ static void handle_direct_message(
 
     struct session_state *target = find_client_by_username(target_username);
 
-    if (target == NULL || target->public_key[0] == '\0') {
-        (void)send_textf(state, "ERR|dm");
+    if (target == NULL) {
+        (void)send_textf(state, "ERR|dm|%s", target_username);
         return;
     }
 
@@ -2587,7 +2587,7 @@ static void handle_direct_message(
             state->public_key,
             payload
         )) {
-        (void)send_textf(state, "ERR|dm");
+        (void)send_textf(state, "ERR|dm|%s", target_username);
         return;
     }
 

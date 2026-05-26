@@ -73,26 +73,81 @@ export function cleanRoomName(text) {
 }
 
 export function roomConversationId(room) {
-  return `room:${room}`;
+  return scopedConversationId(`room:${cleanRoomName(room)}`);
 }
 
 export function directConversationId(username) {
-  return `dm:${cleanUsername(username).toLowerCase()}`;
+  return scopedConversationId(`dm:${cleanUsername(username).toLowerCase()}`);
+}
+
+export function currentAccountKey() {
+  return state.authenticated ? cleanUsername(state.username).toLowerCase() : "";
+}
+
+export function accountKeyForUsername(username) {
+  return cleanUsername(username).toLowerCase();
+}
+
+export function accountSettingKey(name, accountKey = currentAccountKey()) {
+  return accountKey ? `account:${accountKey}:${name}` : "";
+}
+
+export function scopedConversationId(id, accountKey = currentAccountKey()) {
+  return accountKey ? `account:${accountKey}:${id}` : id;
+}
+
+export function unscopedConversationId(id) {
+  const match = /^account:[^:]+:(.+)$/.exec(id || "");
+  return match ? match[1] : id;
 }
 
 export function clearSessionOnly() {
+  clearTimeout(state.refreshTimer);
   state.authenticated = false;
   state.session.deviceId = "";
   state.session.sessionId = "";
   state.session.sessionToken = "";
   state.session.expiresAt = 0;
+  state.username = "";
+  clearAccountRuntimeState();
+}
+
+export function clearAccountRuntimeState() {
   state.peerId = "";
   state.room = "";
   state.roomKey = null;
   state.roomKeys = null;
+  state.pendingRoomSecret = "";
+  state.activeConversationId = "";
+  state.conversations.clear();
   state.peers.clear();
+  for (const pc of state.pcs.values()) {
+    pc.close();
+  }
   state.pcs.clear();
   state.channels.clear();
+  state.incomingFiles.clear();
+  state.identity = null;
+  state.directPeers.clear();
+  state.directPeerIds.clear();
+  state.directWaiters.clear();
+  state.pendingAcks.chat = [];
+  state.pendingAcks.dm.clear();
+  state.calls.active = null;
+  state.calls.sessions.clear();
+  clearTimeout(state.backupTimer);
+  state.backupKey = null;
+  state.backupDirty = false;
+  state.backupBusy = false;
+  state.backupLocked = false;
+
+  if (state.localStream) {
+    for (const track of state.localStream.getTracks()) {
+      track.stop();
+    }
+  }
+
+  state.localStream = null;
 }
 
 export function activeConversation() {
