@@ -78,11 +78,15 @@ The default browser config uses no third-party ICE servers:
 
 ```js
 window.ANONCHAT_CONFIG = {
-  iceServers: []
+  iceServers: [],
+  relayFallbackEnabled: true,
+  turnRequiredForFallback: true
 };
 ```
 
-That is more private, but calls may only work on the same machine or LAN. To make P2P calls work across normal home/mobile NATs, edit [web/config.js](web/config.js) and add STUN/TURN servers you trust. A private TURN server is the better long-term move.
+That is more private, but calls may only work on the same machine or LAN. To make calls work across normal home/mobile NATs and to provide the automatic “call through server” fallback, deploy a first-party TURN server such as coturn and add its `turn:` or `turns:` URLs to [web/config.js](web/config.js). The app still tries direct WebRTC first; if direct ICE fails and TURN is configured, it recreates the WebRTC peer connection with relay-only ICE. TURN relays encrypted DTLS-SRTP packets and does not decrypt call media.
+
+Without TURN in `iceServers`, the app cannot provide server-relayed calls and will show that the relay server is not configured.
 
 ## Important Limits
 

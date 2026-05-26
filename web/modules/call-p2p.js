@@ -516,11 +516,16 @@ function handlePeerConnectionState(peerId, value) {
   if (value === "connected" || value === "completed") {
     detectSelectedTransport(state.pcs.get(peerId)).then((transport) => {
       window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value, transport } }));
-      setCallStatus("Connected", "good");
       if (transport === "server_relay") {
+        setCallStatus("Connected", "good");
         showToast("Connected through relay", "success");
       } else if (transport === "p2p") {
+        setCallStatus("Connected", "good");
         showToast("Connected directly", "success");
+      } else if (state.pcs.get(peerId)?._relayOnly) {
+        setCallStatus("Confirming relay...", "warn");
+      } else {
+        setCallStatus("Connected", "good");
       }
     });
   } else if (value === "failed") {

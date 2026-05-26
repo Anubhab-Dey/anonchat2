@@ -1814,6 +1814,51 @@ cleanup:
     return ok;
 }
 
+static const char *session_failure_reason(
+    const char *session_id,
+    const char *device_public_key,
+    int64_t now
+) {
+    sqlite3_stmt *statement = NULL;
+    const char *reason = "invalid";
+
+    if (session_id == NULL || !valid_id_field(session_id)) {
+        return reason;
+    }
+
+    if (sqlite3_prepare_v2(
+            account_db,
+            "SELECT s.expires_at, s.revoked_at, d.device_public_key "
+            "FROM sessions s JOIN devices d ON d.device_id = s.device_id "
+            "WHERE s.session_id = ?1;",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 1, session_id, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+        int64_t expires_at = sqlite3_column_int64(statement, 0);
+        int64_t revoked_at = sqlite3_column_int64(statement, 1);
+        const unsigned char *public_key_text = sqlite3_column_text(statement, 2);
+
+        if (device_public_key != NULL &&
+            public_key_text != NULL &&
+            strcmp((const char *)public_key_text, device_public_key) != 0) {
+            reason = "invalid";
+        } else if (revoked_at > 0) {
+            reason = "revoked";
+        } else if (expires_at <= now) {
+            reason = "expired";
+        }
+    }
+
+    if (statement != NULL) {
+        sqlite3_finalize(statement);
+    }
+
+    return reason;
+}
+
 static void handle_session_challenge(
     struct session_state *state,
     char *cursor
@@ -1824,6 +1869,7 @@ static void handle_session_challenge(
     int64_t now = now_unix();
     sqlite3_stmt *statement = NULL;
     int ok = 0;
+    const char *failure_reason = "invalid";
 
     memset(nonce, 0, sizeof(nonce));
     memset(db_device_id, 0, sizeof(db_device_id));
@@ -1868,6 +1914,7 @@ static void handle_session_challenge(
         sqlite3_bind_int64(statement, 2, now) != SQLITE_OK ||
         sqlite3_bind_text(statement, 3, state->pending_device_public_key, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_step(statement) != SQLITE_ROW) {
+        failure_reason = session_failure_reason(session_id, state->pending_device_public_key, now);
         goto cleanup;
     }
 
@@ -1917,7 +1964,7 @@ cleanup:
     secure_clear(db_device_id, sizeof(db_device_id));
 
     if (!ok) {
-        (void)send_textf(state, "ERR|session_challenge");
+        (void)send_textf(state, "ERR|session_challenge|%s", failure_reason);
     }
 }
 
@@ -1940,11 +1987,7 @@ static void handle_session_refresh(
         !valid_id_field(nonce) ||
         state == NULL ||
         !state->hello_seen) {
-        (void)send_textf(state, "ERR|session_refresh");
-        if (state != NULL) {
-            state->closing = 1;
-            lws_callback_on_writable(state->wsi);
-        }
+        (void)send_textf(state, "ERR|session_refresh|invalid");
         return;
     }
 
@@ -1956,8 +1999,12 @@ static void handle_session_refresh(
     char db_public_key[PUBLIC_KEY_MAX + 1];
     int64_t now = now_unix();
     int64_t expires_at = now + 86400;
+    int64_t db_expires_at = 0;
+    int64_t db_revoked_at = 0;
     sqlite3_stmt *statement = NULL;
     int ok = 0;
+    int close_on_failure = 0;
+    const char *failure_reason = "invalid";
 
     memset(candidate_hash, 0, sizeof(candidate_hash));
     memset(stored_hash, 0, sizeof(stored_hash));
@@ -1969,16 +2016,16 @@ static void handle_session_refresh(
     if (!hash_session_token(session_token, candidate_hash) ||
         sqlite3_prepare_v2(
             account_db,
-            "SELECT s.token_hash, s.username, s.device_id, d.device_public_key "
+            "SELECT s.token_hash, s.username, s.device_id, d.device_public_key, s.expires_at, s.revoked_at "
             "FROM sessions s JOIN devices d ON d.device_id = s.device_id "
-            "WHERE s.session_id = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2;",
+            "WHERE s.session_id = ?1;",
             -1,
             &statement,
             NULL
         ) != SQLITE_OK ||
         sqlite3_bind_text(statement, 1, session_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
-        sqlite3_bind_int64(statement, 2, now) != SQLITE_OK ||
         sqlite3_step(statement) != SQLITE_ROW) {
+        failure_reason = "invalid";
         goto cleanup;
     }
 
@@ -2000,18 +2047,49 @@ static void handle_session_refresh(
     memcpy(db_username, username_text, bounded_strlen((const char *)username_text, USERNAME_MAX) + 1);
     memcpy(db_device_id, device_id_text, bounded_strlen((const char *)device_id_text, ID_MAX) + 1);
     memcpy(db_public_key, public_key_text, bounded_strlen((const char *)public_key_text, PUBLIC_KEY_MAX) + 1);
+    db_expires_at = sqlite3_column_int64(statement, 4);
+    db_revoked_at = sqlite3_column_int64(statement, 5);
     sqlite3_finalize(statement);
     statement = NULL;
+
+    if (db_revoked_at > 0) {
+        failure_reason = "revoked";
+        close_on_failure = 1;
+        goto cleanup;
+    }
+
+    if (db_expires_at <= now) {
+        failure_reason = "expired";
+        close_on_failure = 1;
+        goto cleanup;
+    }
 
     if ((state->authenticated && (
             strcmp(session_id, state->session_id) != 0 ||
             strcmp(db_username, state->username) != 0 ||
-            strcmp(db_device_id, state->device_id) != 0)) ||
-        strcmp(db_public_key, state->pending_device_public_key) != 0 ||
-        !verify_device_signature(db_public_key, session_id, nonce, nonce_signature) ||
-        !constant_time_equal(candidate_hash, stored_hash, 32) ||
-        !generate_random_id("tok_", new_token, sizeof(new_token)) ||
+            strcmp(db_device_id, state->device_id) != 0))) {
+        failure_reason = "invalid";
+        goto cleanup;
+    }
+
+    if (strcmp(db_public_key, state->pending_device_public_key) != 0) {
+        failure_reason = "invalid";
+        goto cleanup;
+    }
+
+    if (!verify_device_signature(db_public_key, session_id, nonce, nonce_signature)) {
+        failure_reason = "bad_signature";
+        goto cleanup;
+    }
+
+    if (!constant_time_equal(candidate_hash, stored_hash, 32)) {
+        failure_reason = "invalid";
+        goto cleanup;
+    }
+
+    if (!generate_random_id("tok_", new_token, sizeof(new_token)) ||
         !hash_session_token(new_token, candidate_hash)) {
+        failure_reason = "invalid";
         goto cleanup;
     }
 
@@ -2029,6 +2107,7 @@ static void handle_session_refresh(
         sqlite3_bind_text(statement, 3, nonce, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_bind_int64(statement, 4, now) != SQLITE_OK ||
         sqlite3_step(statement) != SQLITE_ROW) {
+        failure_reason = "nonce";
         goto cleanup;
     }
 
@@ -2050,6 +2129,7 @@ static void handle_session_refresh(
         sqlite3_bind_text(statement, 5, db_username, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_bind_text(statement, 6, db_device_id, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_step(statement) != SQLITE_DONE) {
+        failure_reason = "invalid";
         goto cleanup;
     }
 
@@ -2070,6 +2150,7 @@ static void handle_session_refresh(
         sqlite3_bind_text(statement, 4, nonce, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_step(statement) != SQLITE_DONE ||
         sqlite3_changes(account_db) != 1) {
+        failure_reason = "nonce";
         goto cleanup;
     }
 
@@ -2117,9 +2198,12 @@ cleanup:
     secure_clear(db_public_key, sizeof(db_public_key));
 
     if (!ok) {
-        (void)send_textf(state, "ERR|session_refresh");
-        state->closing = 1;
-        lws_callback_on_writable(state->wsi);
+        (void)send_textf(state, "ERR|session_refresh|%s", failure_reason);
+
+        if (close_on_failure) {
+            state->closing = 1;
+            lws_callback_on_writable(state->wsi);
+        }
     }
 }
 

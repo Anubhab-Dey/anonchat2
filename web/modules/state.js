@@ -1,4 +1,8 @@
-export const appConfig = window.ANONCHAT_CONFIG || { iceServers: [] };
+export const appConfig = window.ANONCHAT_CONFIG || {
+  iceServers: [],
+  relayFallbackEnabled: true,
+  turnRequiredForFallback: true,
+};
 
 export function getIceServers() {
   return Array.isArray(appConfig.iceServers) ? appConfig.iceServers : [];
@@ -9,6 +13,14 @@ export function hasTurnRelayConfigured() {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
     return urls.some((url) => typeof url === "string" && /^turns?:/i.test(url));
   });
+}
+
+export function relayFallbackEnabled() {
+  return appConfig.relayFallbackEnabled !== false;
+}
+
+export function turnRequiredForFallback() {
+  return appConfig.turnRequiredForFallback !== false;
 }
 
 export const state = {
@@ -41,6 +53,12 @@ export const state = {
   reconnectTimer: null,
   reconnectAttempts: 0,
   refreshTimer: null,
+  sessionRefresh: {
+    inProgress: false,
+    failureCount: 0,
+    lastFailureAt: 0,
+    retryTimer: null,
+  },
   backupTimer: null,
   backupBusy: false,
   backupDirty: false,
@@ -103,12 +121,17 @@ export function unscopedConversationId(id) {
 
 export function clearSessionOnly() {
   clearTimeout(state.refreshTimer);
+  clearTimeout(state.sessionRefresh.retryTimer);
   state.authenticated = false;
   state.session.deviceId = "";
   state.session.sessionId = "";
   state.session.sessionToken = "";
   state.session.expiresAt = 0;
   state.username = "";
+  state.sessionRefresh.inProgress = false;
+  state.sessionRefresh.failureCount = 0;
+  state.sessionRefresh.lastFailureAt = 0;
+  state.sessionRefresh.retryTimer = null;
   clearAccountRuntimeState();
 }
 

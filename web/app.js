@@ -1,11 +1,13 @@
 import { state, activeConversation, accountKeyForUsername, accountSettingKey, clearSessionOnly } from "./modules/state.js";
 import { els } from "./modules/dom.js";
-import { openLocalDb, dbGet, dbPut } from "./modules/local-db.js";
+import { openLocalDb, dbGet } from "./modules/local-db.js";
 import { connect, onWire, setStatus } from "./modules/wire.js";
 import { signup, login } from "./modules/auth.js";
 import {
   loadSavedSession,
   refreshSession,
+  initializeSessionCoordination,
+  handleSessionRejected,
   handleSessionReplaced,
   clearThisDevice,
   signInAgain,
@@ -146,6 +148,12 @@ function bindEvents() {
   window.addEventListener("anonchat:backup-imported", () => {
     loadConversations().catch(() => {});
   });
+  window.addEventListener("anonchat:session-refreshed", () => {
+    setIdentity(state.username, "good");
+    setupDirectIdentity().catch(() => {});
+    loadConversations().catch(() => {});
+    uploadBackupIfDirty().catch(() => {});
+  });
   window.addEventListener("anonchat:account-cleared", () => {
     resetConversationUi();
   });
@@ -205,18 +213,11 @@ function bindProtocol() {
     const reason = parts[1] || "request";
 
     if (reason === "session") {
-      dbPut("settings", {
-        key: "session",
-        username: state.username,
-        deviceId: state.session.deviceId,
-        sessionId: "",
-        sessionToken: "",
-        expiresAt: 0,
-        backupVersion: state.session.backupVersion,
-      }).catch(() => {});
-      clearSessionOnly();
-      resetConversationUi();
-      showBlockingScreen("Sign in needed", "Your chats are still saved here. Sign in to keep using this device.");
+      handleSessionRejected().catch(() => {
+        clearSessionOnly();
+        resetConversationUi();
+        showBlockingScreen("Sign in needed", "Your chats are still saved here. Sign in to keep using this device.");
+      });
       return;
     }
 
@@ -310,6 +311,7 @@ async function restoreLocalSessionSummary() {
 
 async function boot() {
   await openLocalDb();
+  initializeSessionCoordination();
   await restoreLocalSessionSummary();
   await requestStoragePersistence();
   await loadNotificationSetting();

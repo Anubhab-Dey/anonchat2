@@ -1,4 +1,10 @@
-import { state, activeConversation, cleanUsername, hasTurnRelayConfigured } from "./state.js";
+import {
+  state,
+  activeConversation,
+  cleanUsername,
+  hasTurnRelayConfigured,
+  relayFallbackEnabled,
+} from "./state.js";
 import { els } from "./dom.js";
 import { showToast } from "./toast.js";
 import { addSystemMessage, hideIncomingCall, setCallStatus, showIncomingCall } from "./ui.js";
@@ -219,11 +225,19 @@ export async function startRelayFallback(callSession) {
 
   clearTimeout(callSession.fallbackTimer);
 
+  if (!relayFallbackEnabled()) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
+    showToast("Could not connect", "warning");
+    return;
+  }
+
   if (!hasTurnRelayConfigured()) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
-    showToast("Relay unavailable", "warning");
+    showToast("Relay server not configured", "warning");
     return;
   }
 
