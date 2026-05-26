@@ -49,6 +49,7 @@ import {
   endCallSession,
   handleCallEvent,
 } from "./modules/calls.js";
+import { handleBackendRelayFrame, handleBackendRelayRejected } from "./modules/call-backend-relay.js";
 import {
   addPeer,
   removePeer,
@@ -232,6 +233,11 @@ function bindProtocol() {
       return;
     }
 
+    if (reason === "call_relay") {
+      handleBackendRelayRejected(parts);
+      return;
+    }
+
     showToast("Request could not be completed", "warning");
   });
 
@@ -257,6 +263,11 @@ function bindProtocol() {
   });
   onWire("CALL_EVENT", (parts) => {
     handleCallEvent(parts).catch(() => {});
+  });
+  onWire("CALL_RELAY", (parts) => {
+    handleBackendRelayFrame(parts).catch(() => {
+      showToast("Audio relay interrupted", "warning");
+    });
   });
 }
 

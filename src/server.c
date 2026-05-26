@@ -86,6 +86,7 @@ struct session_state {
 
 struct call_route {
     int active;
+    int accepted;
     char call_id[ID_MAX + 1];
     char call_kind[16];
     char caller_username[USERNAME_MAX + 1];
@@ -1077,6 +1078,22 @@ static int valid_id_field(const char *id) {
             *p == '-';
 
         if (!ok) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int valid_sequence_field(const char *sequence) {
+    size_t len = bounded_strlen(sequence, 21);
+
+    if (len == 0 || len > 20 || sequence[len] != '\0') {
+        return 0;
+    }
+
+    for (const unsigned char *p = (const unsigned char *)sequence; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9') {
             return 0;
         }
     }
@@ -2762,6 +2779,7 @@ static struct call_route *upsert_call_route(
     memcpy(route->call_kind, call_kind, bounded_strlen(call_kind, sizeof(route->call_kind) - 1) + 1);
     memcpy(route->caller_username, caller_username, bounded_strlen(caller_username, USERNAME_MAX) + 1);
     memcpy(route->target, target, bounded_strlen(target, ROOM_MAX) + 1);
+    route->accepted = 0;
     return route;
 }
 
@@ -2838,10 +2856,14 @@ static int route_call_event(
     const char *payload
 ) {
     if (strcmp(route->call_kind, "direct") == 0) {
-        const char *target =
-            strcmp(state->username, route->caller_username) == 0 ?
-            route->target :
-            route->caller_username;
+        const int sender_is_caller = strcmp(state->username, route->caller_username) == 0;
+        const int sender_is_target = strcmp(state->username, route->target) == 0;
+
+        if (!sender_is_caller && !sender_is_target) {
+            return 0;
+        }
+
+        const char *target = sender_is_caller ? route->target : route->caller_username;
         return send_call_event_to_user(state, target, event_type, route->call_id, server_now, payload);
     }
 
@@ -2929,10 +2951,80 @@ static void handle_call_event_command(
 
     if (strcmp(event_type, "end") == 0 || strcmp(event_type, "decline") == 0) {
         route->active = 0;
+    } else if (strcmp(event_type, "accept") == 0) {
+        route->accepted = 1;
     }
 
     (void)insert_call_event(call_id, state->username, state->device_id, event_type, NULL, NULL);
     (void)send_textf(state, "OK|%s|%s|%lld", command, call_id, (long long)server_now);
+}
+
+static int route_call_relay_frame(
+    struct session_state *state,
+    struct call_route *route,
+    const char *sequence,
+    const char *encrypted_frame
+) {
+    if (state == NULL ||
+        route == NULL ||
+        !route->active ||
+        !route->accepted ||
+        strcmp(route->call_kind, "direct") != 0) {
+        return 0;
+    }
+
+    const int sender_is_caller = strcmp(state->username, route->caller_username) == 0;
+    const int sender_is_target = strcmp(state->username, route->target) == 0;
+
+    if (!sender_is_caller && !sender_is_target) {
+        return 0;
+    }
+
+    const char *recipient_username = sender_is_caller ? route->target : route->caller_username;
+    struct session_state *recipient = find_client_by_username(recipient_username);
+
+    if (recipient == NULL) {
+        return 0;
+    }
+
+    return send_textf(
+        recipient,
+        "CALL_RELAY|%s|%s|%s|%s",
+        route->call_id,
+        state->username,
+        sequence,
+        encrypted_frame
+    );
+}
+
+static void handle_call_relay(
+    struct session_state *state,
+    char *cursor
+) {
+    char *call_id = next_field(&cursor);
+    char *sequence = next_field(&cursor);
+    char *encrypted_frame = next_field(&cursor);
+
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (call_id == NULL ||
+        sequence == NULL ||
+        encrypted_frame == NULL ||
+        cursor != NULL ||
+        !valid_id_field(call_id) ||
+        !valid_sequence_field(sequence) ||
+        !valid_payload_field(encrypted_frame)) {
+        (void)send_textf(state, "ERR|call_relay");
+        return;
+    }
+
+    struct call_route *route = find_call_route(call_id);
+
+    if (!route_call_relay_frame(state, route, sequence, encrypted_frame)) {
+        (void)send_textf(state, "ERR|call_relay|%s", call_id);
+    }
 }
 
 static void handle_client_text(struct session_state *state, char *text) {
@@ -3056,6 +3148,11 @@ static void handle_client_text(struct session_state *state, char *text) {
 
     if (strcmp(command, "CALL_END") == 0) {
         handle_call_event_command(state, cursor, "call_end", "end");
+        return;
+    }
+
+    if (strcmp(command, "CALL_RELAY") == 0) {
+        handle_call_relay(state, cursor);
         return;
     }
 

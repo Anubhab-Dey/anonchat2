@@ -191,4 +191,5 @@ const AUTHENTICATED_COMMANDS = new Set([
   "CALL_ACCEPT",
   "CALL_DECLINE",
   "CALL_END",
+  "CALL_RELAY",
 ]);

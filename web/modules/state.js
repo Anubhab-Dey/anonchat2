@@ -1,6 +1,7 @@
 export const appConfig = window.ANONCHAT_CONFIG || {
   iceServers: [],
   relayFallbackEnabled: true,
+  backendRelayFallbackEnabled: true,
   turnRequiredForFallback: true,
 };
 
@@ -17,6 +18,10 @@ export function hasTurnRelayConfigured() {
 
 export function relayFallbackEnabled() {
   return appConfig.relayFallbackEnabled !== false;
+}
+
+export function backendRelayFallbackEnabled() {
+  return appConfig.backendRelayFallbackEnabled !== false;
 }
 
 export function turnRequiredForFallback() {

@@ -4,6 +4,7 @@ window.ANONCHAT_CONFIG = {
   // iceServers: [{ urls: ["turns:turn.example.com:5349"], username: "...", credential: "..." }]
   iceServers: [],
   relayFallbackEnabled: true,
+  backendRelayFallbackEnabled: true,
   turnRequiredForFallback: true,
   iceCandidatePoolSize: 2
 };

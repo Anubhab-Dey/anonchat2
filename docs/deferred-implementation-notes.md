@@ -5,12 +5,14 @@ These notes capture intentionally deferred work so the next pass can continue wi
 ## TURN Relay Deployment
 
 Current state:
-- Calls use WebRTC media only.
+- Calls use WebRTC media first.
 - ICE servers are read from `web/config.js` through `window.ANONCHAT_CONFIG`.
 - The app attempts WebRTC normally first, allowing host/server-reflexive candidates to win.
 - If direct connectivity fails and trusted TURN servers are configured, ICE can select relay candidates automatically.
 - The UI can report direct or relayed connection by inspecting the selected ICE candidate pair.
-- The C server does not relay raw audio/video frames.
+- If no TURN route is available for an accepted direct call, the C server can relay opaque app-encrypted audio frames over `CALL_RELAY`.
+- The backend audio relay is audio-only. It does not support video relay.
+- The C server must never decrypt, parse, log, or persist relayed media frames.
 
 Next pass:
 1. Deploy a first-party TURN service, preferably with TLS (`turns:`) and short-lived credentials.
@@ -23,13 +25,16 @@ Next pass:
 Current state:
 - The backend keeps `CALL_INVITE`, `CALL_ACCEPT`, `CALL_DECLINE`, and `CALL_END`.
 - These commands carry opaque encrypted payloads and are for call state/ringer/event flow only.
-- Media fallback is handled by WebRTC ICE/TURN, not custom `CALL_RELAY` frames.
+- Media fallback order is WebRTC P2P, WebRTC TURN when configured, then direct-call backend audio relay.
+- Backend audio relay uses `CALL_RELAY` only for opaque encrypted audio chunks after the call is accepted.
+- Room-call backend media relay and backend video relay are intentionally deferred.
 - Incoming call invites are classified from decrypted invite metadata, not from direct-user lookup guesses.
 - The browser can restart call peer connections with relay-only ICE when trusted TURN servers are configured.
 
 Next pass:
 1. Add missed-call and active-device push hooks after VAPID is implemented.
 2. Keep the call-event payload encrypted; do not add plaintext call metadata beyond routing fields needed for routing/key discovery.
+3. If backend relay must support room calls or video, add explicit encrypted media framing, queue limits, and UI truth for those media modes before enabling it.
 
 ## VAPID Push Delivery
 

@@ -1,6 +1,7 @@
 import {
   state,
   activeConversation,
+  backendRelayFallbackEnabled,
   cleanUsername,
   hasTurnRelayConfigured,
   relayFallbackEnabled,
@@ -19,6 +20,7 @@ import {
   negotiate,
   resumePendingRemoteOffer,
   stopP2PMedia,
+  closePeer,
   setPeerCallHandler,
 } from "./call-p2p.js";
 import {
@@ -28,6 +30,7 @@ import {
   sendCallAccept,
   sendCallDecline,
 } from "./call-relay.js";
+import { startBackendAudioRelay, stopBackendAudioRelay } from "./call-backend-relay.js";
 import { ensureServerSessionReady } from "./device-session.js";
 
 const P2P_TIMEOUT_MS = 10000;
@@ -58,8 +61,12 @@ export function createCallSession(options) {
     p2p_connected_at: null,
     relay_started_at: null,
     relay_connected_at: null,
+    backend_relay_started_at: null,
+    backend_relay_connected_at: null,
+    accepted_at: null,
     ended_at: null,
     fallbackTimer: null,
+    backend_relay_waiting_for_accept: false,
     peerIds: Array.isArray(options.peerIds) ? options.peerIds : [],
     incoming: Boolean(options.incoming),
     media_mode: options.media_mode || null,
@@ -235,7 +242,7 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
 export async function startRelayFallback(callSession) {
   if (!callSession ||
       callSession.selected_transport ||
-      callSession.relay_started_at ||
+      callSession.backend_relay_started_at ||
       callSession.call_state === "ended" ||
       callSession.call_state === "failed") {
     return;
@@ -252,10 +259,11 @@ export async function startRelayFallback(callSession) {
   }
 
   if (!hasTurnRelayConfigured()) {
-    callSession.call_state = "failed";
-    callSession.ended_at = Date.now();
-    setCallStatus("Could not connect", "bad");
-    showToast("Relay server not configured", "warning");
+    await startBackendRelayFallback(callSession);
+    return;
+  }
+
+  if (callSession.relay_started_at) {
     return;
   }
 
@@ -310,6 +318,58 @@ export async function startRelayFallback(callSession) {
   }
 }
 
+async function startBackendRelayFallback(callSession) {
+  if (!callSession ||
+      callSession.selected_transport ||
+      callSession.call_state === "ended" ||
+      callSession.call_state === "failed") {
+    return;
+  }
+
+  if (!backendRelayFallbackEnabled()) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
+    showToast("Relay server not configured", "warning");
+    return;
+  }
+
+  if (callSession.call_kind !== "direct") {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
+    showToast("Relay server not configured", "warning");
+    return;
+  }
+
+  if (!callSession.accepted_at) {
+    callSession.backend_relay_waiting_for_accept = true;
+    setCallStatus("Waiting for answer...", "warn");
+    return;
+  }
+
+  if (!callSession.peerId || !callSession.peerPublicWire) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
+    return;
+  }
+
+  callSession.call_state = "connecting_backend_relay";
+  callSession.backend_relay_started_at = Date.now();
+  callSession.media_mode = "audio_only";
+  setCallStatus("Connecting audio relay...", "warn");
+  showToast("Using audio relay", "info");
+
+  closePeer(callSession.peerId);
+
+  if (!(await startBackendAudioRelay(callSession))) {
+    callSession.call_state = "failed";
+    callSession.ended_at = Date.now();
+    setCallStatus("Could not connect", "bad");
+  }
+}
+
 export function selectCallTransport(callSession, transport) {
   if (!callSession || callSession.selected_transport) {
     return;
@@ -333,6 +393,7 @@ export function selectCallTransport(callSession, transport) {
 
 export function endCallSession(callSession = state.calls.active, options = {}) {
   if (!callSession) {
+    stopBackendAudioRelay();
     stopP2PMedia();
     setCallStatus("idle");
     return;
@@ -345,6 +406,7 @@ export function endCallSession(callSession = state.calls.active, options = {}) {
   if (shouldNotify) {
     sendCallEnd(callSession).catch(() => {});
   }
+  stopBackendAudioRelay(callSession);
   stopP2PMedia();
   state.calls.active = null;
   hideIncomingCall();
@@ -382,8 +444,18 @@ export async function handleCallEvent(parts) {
 
   if (eventType === "accept") {
     if (session) {
+      session.accepted_at = Date.now();
       session.call_state = "connecting_p2p";
       setCallStatus("Connecting securely...", "warn");
+
+      if (session.backend_relay_waiting_for_accept) {
+        session.backend_relay_waiting_for_accept = false;
+        startBackendRelayFallback(session).catch(() => {
+          session.call_state = "failed";
+          session.ended_at = Date.now();
+          setCallStatus("Could not connect", "bad");
+        });
+      }
     }
     return;
   }
@@ -454,6 +526,7 @@ async function acceptIncomingCall(callSession) {
   hideIncomingCall();
   callSession.media_mode = media.mediaMode;
   callSession.call_state = "connecting_p2p";
+  callSession.accepted_at = Date.now();
 
   if (callSession.call_kind === "direct" && (!callSession.peerId || !callSession.peerPublicWire)) {
     const peer = await requestDirectPeer(callSession.caller_username, { fresh: true });
@@ -494,6 +567,7 @@ function handleP2PState(peerId, value, transport = null) {
 
   if (!callSession ||
       callSession.selected_transport === "server_relay" ||
+      callSession.selected_transport === "backend_relay" ||
       callSession.call_state === "ended" ||
       callSession.call_state === "failed") {
     return;
@@ -524,9 +598,11 @@ function handleP2PState(peerId, value, transport = null) {
   }
 
   if ((value === "failed" || value === "disconnected") && callSession.call_state === "connecting_relay") {
-    callSession.call_state = "failed";
-    callSession.ended_at = Date.now();
-    setCallStatus("Could not connect", "bad");
+    startBackendRelayFallback(callSession).catch(() => {
+      callSession.call_state = "failed";
+      callSession.ended_at = Date.now();
+      setCallStatus("Could not connect", "bad");
+    });
   }
 }
 
