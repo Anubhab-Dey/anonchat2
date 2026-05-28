@@ -3,6 +3,7 @@ export const appConfig = window.ANONCHAT_CONFIG || {
   relayFallbackEnabled: true,
   backendRelayFallbackEnabled: true,
   turnRequiredForFallback: true,
+  callTransport: "backend_relay",
 };
 
 export function getIceServers() {
@@ -22,6 +23,10 @@ export function relayFallbackEnabled() {
 
 export function backendRelayFallbackEnabled() {
   return appConfig.backendRelayFallbackEnabled !== false;
+}
+
+export function callsUseBackendRelayOnly() {
+  return appConfig.callTransport !== "p2p_first";
 }
 
 export function turnRequiredForFallback() {

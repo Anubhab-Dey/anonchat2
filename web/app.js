@@ -371,7 +371,7 @@ async function restoreLocalSessionSummary() {
 
   if (!saved) {
     setIdentity("Not signed in", "warn");
-    return;
+    return null;
   }
 
   els.username.value = saved.username || "";
@@ -382,15 +382,14 @@ async function restoreLocalSessionSummary() {
   if (backup && backup.dirty) {
     state.backupDirty = true;
   }
+
+  return saved;
 }
 
 async function boot() {
   await openLocalDb();
   initializeSessionCoordination();
   await restoreLocalSessionSummary();
-  await requestStoragePersistence();
-  await loadNotificationSetting();
-  await loadConversations();
   loadInitialRoomInputs();
   bindEvents();
   bindProtocol();
@@ -400,6 +399,9 @@ async function boot() {
   checkAppEnvironment();
   registerServiceWorker();
   connect();
+  requestStoragePersistence().catch(() => {});
+  loadNotificationSetting().catch(() => {});
+  loadConversations().catch(() => {});
 }
 
 boot().catch(() => {

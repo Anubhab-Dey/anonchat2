@@ -3007,8 +3007,43 @@ static int route_call_relay_frame(
     if (state == NULL ||
         route == NULL ||
         !route->active ||
-        !route->accepted ||
-        strcmp(route->call_kind, "direct") != 0) {
+        !route->accepted) {
+        return 0;
+    }
+
+    if (strcmp(route->call_kind, "room") == 0) {
+        int sent = 0;
+
+        if (strcmp(state->room, route->target) != 0) {
+            return 0;
+        }
+
+        for (size_t i = 0; i < MAX_CLIENTS; ++i) {
+            struct session_state *client = clients[i];
+
+            if (client == NULL ||
+                client == state ||
+                !client->connected ||
+                !client->authenticated ||
+                !is_active_session(client) ||
+                strcmp(client->room, route->target) != 0) {
+                continue;
+            }
+
+            sent |= send_textf(
+                client,
+                "CALL_RELAY|%s|%s|%s|%s",
+                route->call_id,
+                state->username,
+                sequence,
+                encrypted_frame
+            );
+        }
+
+        return sent;
+    }
+
+    if (strcmp(route->call_kind, "direct") != 0) {
         return 0;
     }
 

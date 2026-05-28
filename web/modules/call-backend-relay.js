@@ -1,6 +1,6 @@
 import { state, backendRelayFallbackEnabled } from "./state.js";
 import { els } from "./dom.js";
-import { bytesToBase64Url, base64UrlToBytes, encryptJson, decryptJson } from "./crypto-box.js";
+import { bytesToBase64Url, base64UrlToBytes, encryptJson, decryptJson, derivePbkdf2Key } from "./crypto-box.js";
 import { deriveDirectKey } from "./direct.js";
 import { sendWire } from "./wire.js";
 import { showToast } from "./toast.js";
@@ -15,7 +15,9 @@ const VIDEO_BITRATE = 360000;
 const relaySessions = new Map();
 
 export async function startBackendMediaRelay(callSession, options = {}) {
-  if (!backendRelayFallbackEnabled() || !callSession || callSession.call_kind !== "direct") {
+  if (!backendRelayFallbackEnabled() ||
+      !callSession ||
+      (callSession.call_kind !== "direct" && callSession.call_kind !== "room")) {
     return false;
   }
 
@@ -38,7 +40,7 @@ export async function startBackendMediaRelay(callSession, options = {}) {
     return false;
   }
 
-  const relay = await ensureRelaySession(callSession);
+  const relay = await ensureRelaySession(callSession, { role: "local" });
 
   if (!relay) {
     setCallStatus("Could not connect", "bad");
@@ -96,8 +98,9 @@ export async function handleBackendRelayFrame(parts) {
   const callSession = state.calls.sessions.get(callId);
 
   if (!callSession ||
-      callSession.call_kind !== "direct" ||
+      (callSession.call_kind !== "direct" && callSession.call_kind !== "room") ||
       callSession.call_state === "ringing" ||
+      callSession.call_state === "calling" ||
       callSession.call_state === "ended" ||
       callSession.call_state === "failed") {
     return;
@@ -108,7 +111,7 @@ export async function handleBackendRelayFrame(parts) {
     return;
   }
 
-  const relay = await ensureRelaySession(callSession);
+  const relay = await ensureRelaySession(callSession, { role: "playback", fromUsername });
 
   if (!relay) {
     if (!callSession._backendRelayMissingKeyWarned) {
@@ -130,7 +133,7 @@ export async function handleBackendRelayFrame(parts) {
 
   markBackendRelayConnected(callSession, { silent: true, mediaMode: payload.media_mode });
 
-  if (!relay.recorder && callSession.accepted_at) {
+  if (!hasLocalRecorder(callSession.call_id) && callSession.accepted_at) {
     startBackendMediaRelay(callSession, { silent: true }).catch(() => {});
   }
 
@@ -139,11 +142,13 @@ export async function handleBackendRelayFrame(parts) {
 
 export function stopBackendAudioRelay(callSession = null) {
   if (callSession) {
-    const relay = relaySessions.get(callSession.call_id);
+    for (const [key, relay] of [...relaySessions.entries()]) {
+      if (!relay || relay.callId !== callSession.call_id) {
+        continue;
+      }
 
-    if (relay) {
       stopRelaySession(relay);
-      relaySessions.delete(callSession.call_id);
+      relaySessions.delete(key);
     }
 
     return;
@@ -175,18 +180,23 @@ export function handleBackendRelayRejected(parts) {
   }
 }
 
-async function ensureRelaySession(callSession) {
-  if (!callSession.peerPublicWire) {
+async function ensureRelaySession(callSession, options = {}) {
+  const key = await relayCryptoKey(callSession);
+
+  if (!key) {
     return null;
   }
 
-  let relay = relaySessions.get(callSession.call_id);
+  const relayId = relaySessionId(callSession.call_id, options);
+  let relay = relaySessions.get(relayId);
 
   if (!relay) {
     relay = {
       callSession,
       callId: callSession.call_id,
-      key: null,
+      relayId,
+      fromUsername: options.fromUsername || "",
+      key,
       sequence: 0,
       recorder: null,
       mimeType: defaultMimeType(callSession.media_mode || "audio_only"),
@@ -208,14 +218,50 @@ async function ensureRelaySession(callSession) {
       currentBlobUrl: "",
       currentBlobElement: null,
     };
-    relaySessions.set(callSession.call_id, relay);
+    relaySessions.set(relayId, relay);
   }
 
   if (!relay.key) {
-    relay.key = await deriveDirectKey(callSession.peerPublicWire);
+    relay.key = key;
   }
 
   return relay;
+}
+
+async function relayCryptoKey(callSession) {
+  if (callSession.call_kind === "direct") {
+    return callSession.peerPublicWire ? deriveDirectKey(callSession.peerPublicWire) : null;
+  }
+
+  if (callSession.call_kind !== "room") {
+    return null;
+  }
+
+  if (state.roomKeys && state.roomKeys.signal) {
+    return state.roomKeys.signal;
+  }
+
+  const room = callSession.room || callSession.target || state.room || "";
+  const secret = callSession.roomSecret || state.pendingRoomSecret || "";
+
+  if (!room || !secret) {
+    return null;
+  }
+
+  return derivePbkdf2Key(secret, `anonchat:${room}:signal-v2`);
+}
+
+function relaySessionId(callId, options = {}) {
+  if (options.role === "playback") {
+    return `${callId}:from:${String(options.fromUsername || "unknown").toLowerCase()}`;
+  }
+
+  return `${callId}:local`;
+}
+
+function hasLocalRecorder(callId) {
+  const relay = relaySessions.get(relaySessionId(callId, { role: "local" }));
+  return Boolean(relay && relay.recorder && relay.recorder.state === "recording");
 }
 
 async function sendMediaChunk(relay, blob) {

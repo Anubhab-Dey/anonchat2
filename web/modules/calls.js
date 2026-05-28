@@ -2,6 +2,7 @@ import {
   state,
   activeConversation,
   backendRelayFallbackEnabled,
+  callsUseBackendRelayOnly,
   cleanUsername,
   hasTurnRelayConfigured,
   relayFallbackEnabled,
@@ -144,6 +145,12 @@ export async function startDirectCall(username = "") {
     peerPublicWire: peer.publicWire,
     media_mode: media.mediaMode,
   });
+
+  if (callsUseBackendRelayOnly()) {
+    await startServerRelayCall(session);
+    return;
+  }
+
   await startP2PAttempt(session, null, { mediaPrepared: true });
 }
 
@@ -158,8 +165,14 @@ export async function startRoomCall(targetPeerId = null) {
   }
 
   const peerIds = targetPeerId ? [targetPeerId] : [...state.peers.keys()];
+  const serverRelayOnly = callsUseBackendRelayOnly();
 
-  if (peerIds.length === 0) {
+  if (!state.room) {
+    showToast("Enter a room first", "warning");
+    return;
+  }
+
+  if (peerIds.length === 0 && !serverRelayOnly) {
     showToast("No one else is here yet", "warning");
     return;
   }
@@ -182,7 +195,28 @@ export async function startRoomCall(targetPeerId = null) {
     peerId: targetPeerId,
     media_mode: media.mediaMode,
   });
+
+  if (serverRelayOnly) {
+    await startServerRelayCall(session);
+    return;
+  }
+
   await startP2PAttempt(session, peerIds, { mediaPrepared: true });
+}
+
+async function startServerRelayCall(callSession, options = {}) {
+  const shouldSendInvite = options.sendInvite !== false;
+  callSession.call_state = callSession.accepted_at ? "connecting_backend_relay" : "calling";
+  callSession.backend_relay_waiting_for_accept = !callSession.accepted_at;
+  setCallStatus(callSession.accepted_at ? "Connecting call..." : "Calling...", "warn");
+
+  if (shouldSendInvite) {
+    await sendCallInvite(callSession).catch(() => {});
+  }
+
+  if (callSession.accepted_at) {
+    await startBackendRelayFallback(callSession);
+  }
 }
 
 export async function startP2PAttempt(callSession, roomPeerIds = null, options = {}) {
@@ -353,7 +387,7 @@ async function startBackendRelayFallback(callSession) {
     return;
   }
 
-  if (callSession.call_kind !== "direct") {
+  if (callSession.call_kind !== "direct" && callSession.call_kind !== "room") {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
@@ -367,7 +401,7 @@ async function startBackendRelayFallback(callSession) {
     return;
   }
 
-  if (!callSession.peerId || !callSession.peerPublicWire) {
+  if (callSession.call_kind === "direct" && (!callSession.peerId || !callSession.peerPublicWire)) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
@@ -379,7 +413,13 @@ async function startBackendRelayFallback(callSession) {
   callSession.media_mode = currentLocalMediaMode();
   setCallStatus(callSession.media_mode === "audio_video" ? "Connecting video call..." : "Connecting audio call...", "warn");
 
-  closePeer(callSession.peerId);
+  if (callSession.call_kind === "direct") {
+    closePeer(callSession.peerId);
+  } else {
+    for (const peerId of callSession.peerIds || []) {
+      closePeer(peerId);
+    }
+  }
 
   if (!(await startBackendMediaRelay(callSession))) {
     callSession.call_state = "failed";
@@ -529,8 +569,19 @@ export async function handleCallEvent(parts) {
   if (eventType === "accept") {
     if (session) {
       session.accepted_at = Date.now();
-      session.call_state = "connecting_p2p";
       setCallStatus("Connecting...", "warn");
+
+      if (callsUseBackendRelayOnly()) {
+        session.backend_relay_waiting_for_accept = false;
+        startBackendRelayFallback(session).catch(() => {
+          session.call_state = "failed";
+          session.ended_at = Date.now();
+          setCallStatus("Could not connect", "bad");
+        });
+        return;
+      }
+
+      session.call_state = "connecting_p2p";
       scheduleP2PFallback(session);
 
       if (session.backend_relay_waiting_for_accept) {
@@ -621,6 +672,12 @@ async function acceptIncomingCall(callSession) {
   }
 
   await sendCallAccept(callSession).catch(() => {});
+
+  if (callsUseBackendRelayOnly()) {
+    await startBackendRelayFallback(callSession);
+    return;
+  }
+
   const peers = callSession.call_kind === "room" ? [...state.peers.keys()] : null;
   const pendingPeers = callSession.call_kind === "room" ? peers : [callSession.peerId].filter(Boolean);
   let resumed = false;

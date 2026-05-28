@@ -25,6 +25,12 @@ export async function setupDirectIdentity() {
 }
 
 export async function ensureDirectIdentity() {
+  if (state.identity &&
+      state.identity.keyPair &&
+      state.identity.publicWire) {
+    return state.identity;
+  }
+
   const key = accountSettingKey("direct_identity");
 
   if (!key) {

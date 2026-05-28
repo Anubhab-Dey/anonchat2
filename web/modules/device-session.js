@@ -49,6 +49,12 @@ export function initializeSessionCoordination() {
 }
 
 export async function ensureDeviceIdentity() {
+  if (state.deviceIdentity &&
+      state.deviceIdentity.keyPair &&
+      state.deviceIdentity.publicWire) {
+    return state.deviceIdentity;
+  }
+
   let saved = await dbGet("settings", "device_identity");
 
   if (!saved || saved.kind !== "session-signing-v1") {
