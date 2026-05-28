@@ -30,7 +30,7 @@ import {
   sendCallAccept,
   sendCallDecline,
 } from "./call-relay.js";
-import { startBackendAudioRelay, stopBackendAudioRelay } from "./call-backend-relay.js";
+import { startBackendMediaRelay, stopBackendAudioRelay } from "./call-backend-relay.js";
 import { ensureServerSessionReady } from "./device-session.js";
 
 const P2P_TIMEOUT_MS = 10000;
@@ -204,18 +204,8 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
   callSession.peerIds = callSession.call_kind === "direct" ?
     [callSession.peerId].filter(Boolean) :
     [...(roomPeerIds || [...state.peers.keys()])];
-  setCallStatus("Connecting securely...", "warn");
-
-  clearTimeout(callSession.fallbackTimer);
-  callSession.fallbackTimer = setTimeout(() => {
-    if (!callSession.selected_transport && callSession.call_state === "connecting_p2p") {
-      startRelayFallback(callSession).catch(() => {
-        callSession.call_state = "failed";
-        callSession.ended_at = Date.now();
-        setCallStatus("Could not connect", "bad");
-      });
-    }
-  }, P2P_TIMEOUT_MS);
+  setCallStatus(callSession.call_kind === "direct" && !callSession.accepted_at ? "Calling..." : "Connecting...", "warn");
+  scheduleP2PFallback(callSession);
 
   if (shouldSendInvite) {
     await sendCallInvite(callSession).catch(() => {});
@@ -237,6 +227,35 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
     addLocalTracksTo(pc);
     await negotiate(peerId);
   }
+}
+
+function scheduleP2PFallback(callSession, delay = P2P_TIMEOUT_MS) {
+  clearTimeout(callSession.fallbackTimer);
+
+  if (!shouldStartP2PFallbackTimer(callSession)) {
+    return;
+  }
+
+  callSession.fallbackTimer = setTimeout(() => {
+    if (!callSession.selected_transport && callSession.call_state === "connecting_p2p") {
+      startRelayFallback(callSession).catch(() => {
+        callSession.call_state = "failed";
+        callSession.ended_at = Date.now();
+        setCallStatus("Could not connect", "bad");
+      });
+    }
+  }, delay);
+}
+
+function shouldStartP2PFallbackTimer(callSession) {
+  if (!callSession ||
+      callSession.selected_transport ||
+      callSession.call_state === "ended" ||
+      callSession.call_state === "failed") {
+    return false;
+  }
+
+  return callSession.call_kind !== "direct" || Boolean(callSession.accepted_at);
 }
 
 export async function startRelayFallback(callSession) {
@@ -357,16 +376,24 @@ async function startBackendRelayFallback(callSession) {
 
   callSession.call_state = "connecting_backend_relay";
   callSession.backend_relay_started_at = Date.now();
-  callSession.media_mode = "audio_only";
-  setCallStatus("Connecting audio call...", "warn");
+  callSession.media_mode = currentLocalMediaMode();
+  setCallStatus(callSession.media_mode === "audio_video" ? "Connecting video call..." : "Connecting audio call...", "warn");
 
   closePeer(callSession.peerId);
 
-  if (!(await startBackendAudioRelay(callSession))) {
+  if (!(await startBackendMediaRelay(callSession))) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
   }
+}
+
+function currentLocalMediaMode() {
+  const videoTracks = state.localStream ?
+    state.localStream.getVideoTracks().filter((track) => track.readyState === "live" && track.enabled !== false) :
+    [];
+
+  return videoTracks.length > 0 ? "audio_video" : "audio_only";
 }
 
 export function selectCallTransport(callSession, transport) {
@@ -503,7 +530,8 @@ export async function handleCallEvent(parts) {
     if (session) {
       session.accepted_at = Date.now();
       session.call_state = "connecting_p2p";
-      setCallStatus("Connecting securely...", "warn");
+      setCallStatus("Connecting...", "warn");
+      scheduleP2PFallback(session);
 
       if (session.backend_relay_waiting_for_accept) {
         session.backend_relay_waiting_for_accept = false;
@@ -602,6 +630,7 @@ async function acceptIncomingCall(callSession) {
   }
 
   if (resumed && callSession.call_kind === "direct") {
+    scheduleP2PFallback(callSession);
     return;
   }
 
@@ -640,6 +669,11 @@ function handleP2PState(peerId, value, transport = null) {
   }
 
   if ((value === "failed" || value === "disconnected") && callSession.call_state === "connecting_p2p") {
+    if (!shouldStartP2PFallbackTimer(callSession)) {
+      setCallStatus("Calling...", "warn");
+      return;
+    }
+
     callSession.call_state = "reconnecting";
     setCallStatus("Reconnecting...", "warn");
     setTimeout(() => {
