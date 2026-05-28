@@ -31,7 +31,7 @@ export async function startBackendAudioRelay(callSession, options = {}) {
 
   if (!window.MediaRecorder) {
     setCallStatus("Could not connect", "bad");
-    showToast("Audio relay unavailable", "warning");
+    showToast("Call could not connect", "warning");
     return false;
   }
 
@@ -39,7 +39,7 @@ export async function startBackendAudioRelay(callSession, options = {}) {
 
   if (!relay) {
     setCallStatus("Could not connect", "bad");
-    showToast("Audio relay unavailable", "warning");
+    showToast("Call could not connect", "warning");
     return false;
   }
 
@@ -66,7 +66,7 @@ export async function startBackendAudioRelay(callSession, options = {}) {
     sendAudioChunk(relay, event.data).catch(() => {
       if (!relay.sendWarned) {
         relay.sendWarned = true;
-        showToast("Audio relay interrupted", "warning");
+        showToast("Connection unstable", "warning");
       }
     });
   };
@@ -74,7 +74,7 @@ export async function startBackendAudioRelay(callSession, options = {}) {
   recorder.onerror = () => {
     if (!relay.sendWarned) {
       relay.sendWarned = true;
-      showToast("Audio relay interrupted", "warning");
+      showToast("Connection unstable", "warning");
     }
   };
 
@@ -107,7 +107,7 @@ export async function handleBackendRelayFrame(parts) {
   if (!relay) {
     if (!callSession._backendRelayMissingKeyWarned) {
       callSession._backendRelayMissingKeyWarned = true;
-      showToast("Audio relay unavailable", "warning");
+      showToast("Call could not connect", "warning");
     }
     return;
   }
@@ -165,7 +165,7 @@ export function handleBackendRelayRejected(parts) {
 
   if (!callSession._backendRelayFailedToastShown) {
     callSession._backendRelayFailedToastShown = true;
-    showToast("Audio relay could not connect", "warning");
+    showToast("Call could not connect", "warning");
   }
 }
 
@@ -215,7 +215,7 @@ async function sendAudioChunk(relay, blob) {
       state.ws.readyState !== WebSocket.OPEN) {
     if (!relay.sendWarned) {
       relay.sendWarned = true;
-      showToast("Audio relay reconnecting", "warning");
+      showToast("Connection unstable", "warning");
     }
     return;
   }
@@ -223,7 +223,7 @@ async function sendAudioChunk(relay, blob) {
   if (blob.size > MAX_AUDIO_CHUNK_BYTES) {
     if (!relay.sendWarned) {
       relay.sendWarned = true;
-      showToast("Audio relay chunk too large", "warning");
+      showToast("Connection unstable", "warning");
     }
     return;
   }
@@ -257,7 +257,7 @@ function markBackendRelayConnected(callSession, options = {}) {
 
   if (!options.silent && !callSession._backendRelayToastShown) {
     callSession._backendRelayToastShown = true;
-    showToast("Audio-only relay call", "info");
+    showToast("Audio-only call", "info");
   }
 }
 

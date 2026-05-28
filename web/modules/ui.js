@@ -45,6 +45,26 @@ export function hideBlockingScreen() {
   }
 }
 
+export function openNavigation() {
+  document.body.classList.add("nav-open");
+  if (els.menuBtn) {
+    els.menuBtn.setAttribute("aria-expanded", "true");
+  }
+  if (els.drawerBackdrop) {
+    els.drawerBackdrop.hidden = false;
+  }
+}
+
+export function closeNavigation() {
+  document.body.classList.remove("nav-open");
+  if (els.menuBtn) {
+    els.menuBtn.setAttribute("aria-expanded", "false");
+  }
+  if (els.drawerBackdrop) {
+    els.drawerBackdrop.hidden = true;
+  }
+}
+
 export function showIncomingCall(session, onAccept, onDecline) {
   if (!els.incomingCallScreen) {
     return;

@@ -1,7 +1,7 @@
 import { state, accountKeyForUsername, clearAccountRuntimeState, clearSessionOnly } from "./state.js";
 import { dbGet, dbPut, deleteLocalData } from "./local-db.js";
 import { enc, textToBase64Url, bytesToBase64Url, base64UrlToText } from "./crypto-box.js";
-import { flushWireQueue, sendAndWait, sendWire, stopReconnect, waitForWire } from "./wire.js";
+import { sendAndWait, sendWire, stopReconnect, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { showBlockingScreen, hideBlockingScreen, setIdentity } from "./ui.js";
 
@@ -11,6 +11,9 @@ const REFRESH_LOCK_KEY = "anonchat.session.refreshLock";
 const SESSION_EVENT_KEY = "anonchat.session.event";
 const REFRESH_LOCK_TTL_MS = 12000;
 const REFRESH_RETRY_BASE_MS = 3000;
+const NORMAL_REFRESH_MIN_INTERVAL_MS = 30000;
+const REFRESH_EARLY_MS = 30 * 60 * 1000;
+const INVALID_EXPIRY_REFRESH_DELAY_MS = 30000;
 const tabId = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 
 let sessionChannel = null;
@@ -113,7 +116,6 @@ export async function storeSessionFromAuth(parts) {
   });
   resetRefreshFailures();
   broadcastSessionRefreshed();
-  flushWireQueue();
   hideBlockingScreen();
   setIdentity(state.username, "good");
   scheduleSessionRefresh();
@@ -144,11 +146,20 @@ export function scheduleSessionRefresh() {
     return;
   }
 
-  const msUntilRefresh = Math.max(5000, (state.session.expiresAt * 1000) - Date.now() - (30 * 60 * 1000));
-  state.refreshTimer = setTimeout(refreshSession, msUntilRefresh);
+  const expiresAtMs = Number(state.session.expiresAt || 0) * 1000;
+  const now = Date.now();
+  let delay = INVALID_EXPIRY_REFRESH_DELAY_MS;
+
+  if (Number.isFinite(expiresAtMs) && expiresAtMs > now) {
+    delay = Math.max(NORMAL_REFRESH_MIN_INTERVAL_MS, expiresAtMs - now - REFRESH_EARLY_MS);
+  }
+
+  state.refreshTimer = setTimeout(() => {
+    refreshSession({ reason: "scheduled" }).catch(() => {});
+  }, delay);
 }
 
-export async function refreshSession() {
+export async function refreshSession(options = {}) {
   if (!state.session.sessionId || !state.session.sessionToken) {
     return false;
   }
@@ -157,7 +168,18 @@ export async function refreshSession() {
     return refreshInFlight;
   }
 
+  const now = Date.now();
+  const force = options.force === true;
+
+  if (!force &&
+      state.serverSessionReady &&
+      state.sessionRefresh.lastRefreshStartedAt &&
+      now - state.sessionRefresh.lastRefreshStartedAt < NORMAL_REFRESH_MIN_INTERVAL_MS) {
+    return true;
+  }
+
   const snapshot = sessionSnapshot();
+  state.sessionRefresh.lastRefreshStartedAt = now;
   state.sessionRefresh.inProgress = true;
   refreshInFlight = withSessionRefreshLock(snapshot, async () => {
     if (await adoptStoredSessionIfChanged(snapshot)) {
@@ -182,16 +204,16 @@ export async function ensureServerSessionReady() {
     return false;
   }
 
-  setIdentity(state.username ? `${state.username} reconnecting` : "Reconnecting", "warn");
-  showToast("Reconnecting securely...", "info");
-  const refreshed = await refreshSession();
+  setIdentity(state.username ? `${state.username} connecting` : "Connecting", "warn");
+  showToast("Still connecting...", "info");
+  const refreshed = await refreshSession({ force: true, reason: "user_action" });
 
   if (refreshed && state.authenticated && state.serverSessionReady) {
     return true;
   }
 
   if (state.session.sessionId && state.session.sessionToken) {
-    showToast("Still reconnecting", "info");
+    showToast("Still connecting...", "info");
   }
 
   return false;
@@ -233,8 +255,7 @@ async function performSessionRefresh(snapshot) {
       sessionId: parts[2],
       sessionToken: parts[3],
       expiresAt: Number(parts[4] || 0),
-    });
-    showToast("Session refreshed", "success");
+    }, { serverReady: true });
     return true;
   } catch {
     return handleTransientRefreshFailure();
@@ -301,16 +322,16 @@ async function handleTransientRefreshFailure() {
   const now = Date.now();
   state.sessionRefresh.failureCount++;
   state.sessionRefresh.lastFailureAt = now;
-  setIdentity(state.username ? `${state.username} reconnecting` : "Reconnecting", "warn");
+  state.sessionRefresh.lastRefreshFailedAt = now;
 
-  if (state.sessionRefresh.failureCount === 1) {
-    showToast("Reconnecting securely...", "info");
+  if (!state.serverSessionReady) {
+    setIdentity(state.username ? `${state.username} connecting` : "Connecting", "warn");
   }
 
   clearTimeout(state.sessionRefresh.retryTimer);
   const delay = Math.min(30000, REFRESH_RETRY_BASE_MS * state.sessionRefresh.failureCount);
   state.sessionRefresh.retryTimer = setTimeout(() => {
-    refreshSession().catch(() => {});
+    refreshSession({ force: true, reason: "retry" }).catch(() => {});
   }, delay);
   return false;
 }
@@ -339,15 +360,14 @@ export async function handleSessionRejected() {
     return confirmSessionInvalid("invalid");
   }
 
-  const refreshed = await refreshSession();
+  const refreshed = await refreshSession({ force: true, reason: "session_rejected" });
 
   if (refreshed) {
-    showToast("Reconnected securely", "success");
     return true;
   }
 
   if (state.session.sessionId && state.session.sessionToken) {
-    showToast("Reconnecting securely...", "info");
+    showToast("Still connecting...", "info");
     return false;
   }
 
@@ -395,8 +415,10 @@ async function applySessionRefresh(payload, options = {}) {
     return false;
   }
 
+  const serverReady = options.serverReady === true || (options.fromPeer && state.serverSessionReady);
+
   state.authenticated = true;
-  state.serverSessionReady = true;
+  state.serverSessionReady = serverReady;
   state.username = payload.username || state.username;
   state.session.deviceId = payload.deviceId || state.session.deviceId;
   state.session.sessionId = payload.sessionId;
@@ -405,16 +427,22 @@ async function applySessionRefresh(payload, options = {}) {
 
   await persistSessionSettings();
   resetRefreshFailures();
-  flushWireQueue();
-  hideBlockingScreen();
-  setIdentity(state.username, "good");
+  state.sessionRefresh.lastRefreshSucceededAt = Date.now();
+
+  if (serverReady) {
+    hideBlockingScreen();
+    setIdentity(state.username, "good");
+  }
+
   scheduleSessionRefresh();
 
   if (!options.fromPeer) {
     broadcastSessionRefreshed();
   }
 
-  window.dispatchEvent(new Event("anonchat:session-refreshed"));
+  window.dispatchEvent(new CustomEvent("anonchat:session-refreshed", {
+    detail: { serverReady },
+  }));
   return true;
 }
 
@@ -436,6 +464,7 @@ function resetRefreshFailures() {
   state.sessionRefresh.failureCount = 0;
   state.sessionRefresh.confirmedInvalidCount = 0;
   state.sessionRefresh.lastFailureAt = 0;
+  state.sessionRefresh.lastRefreshFailedAt = 0;
   state.sessionRefresh.retryTimer = null;
 }
 
@@ -476,7 +505,7 @@ async function handleSessionMessage(message) {
 
   const applied = await applySessionRefresh(message, { fromPeer: true });
 
-  if (applied) {
+  if (applied && state.serverSessionReady) {
     resolveExternalRefreshWaiters(message);
   }
 }
@@ -522,13 +551,15 @@ async function adoptStoredSessionIfChanged(snapshot) {
     return false;
   }
 
-  return applySessionRefresh({
+  const applied = await applySessionRefresh({
     username: saved.username,
     deviceId: saved.deviceId,
     sessionId: saved.sessionId,
     sessionToken: saved.sessionToken,
     expiresAt: saved.expiresAt,
   }, { fromPeer: true });
+
+  return applied && state.serverSessionReady;
 }
 
 function sameSession(left, right) {

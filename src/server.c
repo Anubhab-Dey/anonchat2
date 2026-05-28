@@ -2657,6 +2657,7 @@ static void handle_direct_message(
     char *cursor
 ) {
     char *target_username = next_field(&cursor);
+    char *message_id = next_field(&cursor);
     char *payload = next_field(&cursor);
 
     if (!require_active_session(state)) {
@@ -2665,9 +2666,11 @@ static void handle_direct_message(
 
     if (state->public_key[0] == '\0' ||
         target_username == NULL ||
+        message_id == NULL ||
         payload == NULL ||
         cursor != NULL ||
         !valid_username(target_username) ||
+        !valid_id_field(message_id) ||
         !valid_payload_field(payload)) {
         (void)send_textf(state, "ERR|dm");
         return;
@@ -2676,23 +2679,59 @@ static void handle_direct_message(
     struct session_state *target = find_client_by_username(target_username);
 
     if (target == NULL) {
-        (void)send_textf(state, "ERR|dm|%s", target_username);
+        (void)send_textf(state, "ERR|dm|%s|%s|target_unavailable", target_username, message_id);
         return;
     }
 
     if (!send_textf(
             target,
-            "DM|%s|%s|%s|%s",
+            "DM|%s|%s|%s|%s|%s",
             state->username,
             state->peer_id,
             state->public_key,
+            message_id,
             payload
         )) {
-        (void)send_textf(state, "ERR|dm|%s", target_username);
+        (void)send_textf(state, "ERR|dm|%s|%s|target_unavailable", target_username, message_id);
         return;
     }
 
-    (void)send_textf(state, "OK|dm|%s|%lld", target->username, (long long)now_unix());
+    (void)send_textf(state, "OK|dm|%s|%s|%lld", target->username, message_id, (long long)now_unix());
+}
+
+static void handle_direct_receipt(
+    struct session_state *state,
+    char *cursor
+) {
+    char *sender_username = next_field(&cursor);
+    char *message_id = next_field(&cursor);
+
+    if (!require_active_session(state)) {
+        return;
+    }
+
+    if (sender_username == NULL ||
+        message_id == NULL ||
+        cursor != NULL ||
+        !valid_username(sender_username) ||
+        !valid_id_field(message_id)) {
+        (void)send_textf(state, "ERR|dm_receipt");
+        return;
+    }
+
+    struct session_state *sender = find_client_by_username(sender_username);
+
+    if (sender == NULL) {
+        return;
+    }
+
+    (void)send_textf(
+        sender,
+        "DM_RECEIPT|%s|%s|%lld",
+        state->username,
+        message_id,
+        (long long)now_unix()
+    );
 }
 
 static void handle_direct_signal(
@@ -3123,6 +3162,11 @@ static void handle_client_text(struct session_state *state, char *text) {
 
     if (strcmp(command, "DM") == 0) {
         handle_direct_message(state, cursor);
+        return;
+    }
+
+    if (strcmp(command, "DM_RECEIVED") == 0) {
+        handle_direct_receipt(state, cursor);
         return;
     }
 

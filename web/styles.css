@@ -46,6 +46,46 @@ body {
   text-align: center;
 }
 
+.app-topbar {
+  align-items: center;
+  background: var(--rail);
+  border-bottom: 1px solid var(--line);
+  display: none;
+  gap: 10px;
+  padding: 10px 12px;
+  position: sticky;
+  top: 0;
+  z-index: 35;
+}
+
+.topbar-title {
+  display: grid;
+  min-width: 0;
+}
+
+.topbar-title strong,
+.topbar-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-title span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.drawer-backdrop {
+  background: rgba(5, 8, 11, 0.58);
+  inset: 0;
+  position: fixed;
+  z-index: 38;
+}
+
+.drawer-backdrop[hidden] {
+  display: none;
+}
+
 button,
 input,
 textarea {
@@ -163,6 +203,10 @@ h2 {
   margin-bottom: 14px;
 }
 
+.close-menu {
+  display: none;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -213,6 +257,16 @@ h2 {
 .conversation-tools .quiet-button {
   min-height: 30px;
   padding: 4px 9px;
+}
+
+.settings-actions,
+.call-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.call-controls {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .pill {
@@ -621,11 +675,38 @@ a {
 }
 
 @media (max-width: 760px) {
+  .app-topbar {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
   }
 
-  .rail,
+  .rail {
+    border-width: 0 1px 0 0;
+    bottom: 0;
+    box-shadow: 18px 0 40px var(--shadow);
+    left: 0;
+    max-width: min(88vw, 360px);
+    padding: 12px;
+    position: fixed;
+    top: 0;
+    transform: translateX(-105%);
+    transition: transform 160ms ease;
+    width: 100%;
+    z-index: 40;
+  }
+
+  body.nav-open .rail {
+    transform: translateX(0);
+  }
+
+  .close-menu {
+    display: grid;
+  }
+
   .activity {
     border-width: 0 0 1px 0;
     padding: 12px;
@@ -648,6 +729,10 @@ a {
   .activity {
     display: grid;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .call-controls {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .composer {
@@ -719,7 +804,8 @@ a {
   }
 
   .activity,
-  .room-actions {
+  .room-actions,
+  .call-controls {
     grid-template-columns: 1fr;
   }
 

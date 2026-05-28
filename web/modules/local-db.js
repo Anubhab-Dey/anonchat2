@@ -8,7 +8,7 @@ import {
 } from "./state.js";
 
 const DB_NAME = "anonchat-local-v1";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export function openLocalDb() {
   if (!("indexedDB" in window)) {
@@ -32,6 +32,14 @@ export function openLocalDb() {
 
       if (!db.objectStoreNames.contains("settings")) {
         db.createObjectStore("settings", { keyPath: "key" });
+      }
+
+      const outbox = db.objectStoreNames.contains("directOutbox") ?
+        request.transaction.objectStore("directOutbox") :
+        db.createObjectStore("directOutbox", { keyPath: "id" });
+
+      if (!outbox.indexNames.contains("byAccount")) {
+        outbox.createIndex("byAccount", "account_key");
       }
     };
 
@@ -113,6 +121,50 @@ export async function dbGetConversationMessages(conversationId) {
   const messages = (await dbRequest(index.getAll(IDBKeyRange.only(conversationId))))
     .filter((message) => message.account_key === accountKey);
   return messages.sort((a, b) => (a.client_created_at || a.at || 0) - (b.client_created_at || b.at || 0));
+}
+
+export async function dbGetAccountMessage(messageId, accountKey = currentAccountKey()) {
+  if (!messageId || !accountKey) {
+    return null;
+  }
+
+  const message = await dbGet("messages", messageId);
+  return message && message.account_key === accountKey ? message : null;
+}
+
+export async function dbGetDirectOutbox(accountKey = currentAccountKey()) {
+  if (!accountKey) {
+    return [];
+  }
+
+  const store = dbStore("directOutbox");
+
+  if (!store) {
+    return [];
+  }
+
+  if (store.indexNames.contains("byAccount")) {
+    return dbRequest(store.index("byAccount").getAll(IDBKeyRange.only(accountKey)));
+  }
+
+  return (await dbGetAll("directOutbox")).filter((item) => item.account_key === accountKey);
+}
+
+export async function dbPutDirectOutbox(record) {
+  const accountKey = currentAccountKey();
+
+  if (!record || !record.id || !accountKey) {
+    return;
+  }
+
+  await dbPut("directOutbox", {
+    ...record,
+    account_key: accountKey,
+  });
+}
+
+export async function dbDeleteDirectOutbox(messageId) {
+  await dbDelete("directOutbox", messageId);
 }
 
 export async function exportBackupData(username) {

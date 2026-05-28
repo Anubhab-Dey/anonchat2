@@ -63,7 +63,10 @@ export const state = {
     inProgress: false,
     failureCount: 0,
     confirmedInvalidCount: 0,
+    lastRefreshStartedAt: 0,
+    lastRefreshSucceededAt: 0,
     lastFailureAt: 0,
+    lastRefreshFailedAt: 0,
     retryTimer: null,
   },
   backupTimer: null,
@@ -139,7 +142,10 @@ export function clearSessionOnly() {
   state.sessionRefresh.inProgress = false;
   state.sessionRefresh.failureCount = 0;
   state.sessionRefresh.confirmedInvalidCount = 0;
+  state.sessionRefresh.lastRefreshStartedAt = 0;
+  state.sessionRefresh.lastRefreshSucceededAt = 0;
   state.sessionRefresh.lastFailureAt = 0;
+  state.sessionRefresh.lastRefreshFailedAt = 0;
   state.sessionRefresh.retryTimer = null;
   clearAccountRuntimeState();
 }

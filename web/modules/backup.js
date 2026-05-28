@@ -90,7 +90,6 @@ export async function uploadBackupIfDirty() {
     state.session.backupVersion = Number(parts[2] || nextVersion);
     state.backupDirty = false;
     await persistBackupSettings(false);
-    showToast("Chats saved", "success");
   } catch {
     state.backupDirty = true;
     await persistBackupSettings(true);

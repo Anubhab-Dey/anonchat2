@@ -223,6 +223,8 @@ export async function openConversation(conversationId, options = {}) {
   if (conversation.kind === "dm") {
     els.directUsername.value = conversation.username || "";
   }
+
+  window.dispatchEvent(new Event("anonchat:navigation-used"));
 }
 
 export async function renderConversationHistory(conversationId) {

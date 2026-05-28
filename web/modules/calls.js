@@ -280,7 +280,7 @@ export async function startRelayFallback(callSession) {
   callSession.call_state = "connecting_relay";
   callSession.relay_started_at = Date.now();
   setCallStatus("Connecting securely...", "warn");
-  showToast("Trying relay-capable reconnect", "info");
+  showToast("Still connecting call...", "info");
 
   if (callSession.call_kind === "direct") {
     if (!callSession.peerId || !callSession.peerPublicWire) {
@@ -330,7 +330,7 @@ async function startBackendRelayFallback(callSession) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
-    showToast("Relay server not configured", "warning");
+    showToast("Call could not connect", "warning");
     return;
   }
 
@@ -338,7 +338,7 @@ async function startBackendRelayFallback(callSession) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
-    showToast("Relay server not configured", "warning");
+    showToast("Call could not connect", "warning");
     return;
   }
 
@@ -358,8 +358,7 @@ async function startBackendRelayFallback(callSession) {
   callSession.call_state = "connecting_backend_relay";
   callSession.backend_relay_started_at = Date.now();
   callSession.media_mode = "audio_only";
-  setCallStatus("Connecting audio relay...", "warn");
-  showToast("Using audio relay", "info");
+  setCallStatus("Connecting audio call...", "warn");
 
   closePeer(callSession.peerId);
 
@@ -388,7 +387,6 @@ export function selectCallTransport(callSession, transport) {
   callSession.call_state = "connected_relay";
   callSession.relay_connected_at = Date.now();
   setCallStatus("Connected", "good");
-  showToast("Connected through relay", "success");
 }
 
 export function endCallSession(callSession = state.calls.active, options = {}) {
@@ -412,6 +410,65 @@ export function endCallSession(callSession = state.calls.active, options = {}) {
   hideIncomingCall();
   setCallStatus("idle");
   addSystemMessage("call ended");
+}
+
+export function toggleMicrophone() {
+  const tracks = state.localStream ? state.localStream.getAudioTracks() : [];
+
+  if (tracks.length === 0) {
+    showToast("Microphone unavailable", "warning");
+    return;
+  }
+
+  const nextEnabled = tracks.some((track) => !track.enabled);
+
+  for (const track of tracks) {
+    track.enabled = nextEnabled;
+  }
+
+  if (els.micMuteBtn) {
+    els.micMuteBtn.textContent = nextEnabled ? "Mute" : "Unmute";
+    els.micMuteBtn.setAttribute("aria-pressed", String(!nextEnabled));
+  }
+
+  setCallStatus(nextEnabled ? "Connected" : "Muted", nextEnabled ? "good" : "warn");
+}
+
+export function toggleCamera() {
+  const tracks = state.localStream ? state.localStream.getVideoTracks() : [];
+
+  if (tracks.length === 0) {
+    showToast("Camera unavailable", "warning");
+    return;
+  }
+
+  const nextEnabled = tracks.some((track) => !track.enabled);
+
+  for (const track of tracks) {
+    track.enabled = nextEnabled;
+  }
+
+  if (els.cameraToggleBtn) {
+    els.cameraToggleBtn.textContent = nextEnabled ? "Camera off" : "Camera on";
+    els.cameraToggleBtn.setAttribute("aria-pressed", String(!nextEnabled));
+  }
+
+  setCallStatus(nextEnabled ? "Connected" : "Camera off", nextEnabled ? "good" : "warn");
+}
+
+export async function minimizeCall() {
+  const video = document.querySelector("#remoteVideos video") || els.localVideo;
+
+  if (!video || !document.pictureInPictureEnabled || !video.requestPictureInPicture) {
+    showToast("Mini call is not available here", "info");
+    return;
+  }
+
+  try {
+    await video.requestPictureInPicture();
+  } catch {
+    showToast("Mini call is not available here", "info");
+  }
 }
 
 export async function handleCallEvent(parts) {

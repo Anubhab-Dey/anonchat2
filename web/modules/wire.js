@@ -1,9 +1,9 @@
 import { state } from "./state.js";
 import { setText } from "./dom.js";
 import { els } from "./dom.js";
-import { showToast } from "./toast.js";
 
 const handlers = new Map();
+const MAX_WIRE_QUEUE = 500;
 
 export function wsUrl() {
   if (location.protocol === "http:" || location.protocol === "https:") {
@@ -25,6 +25,10 @@ export function setStatus(text, tone = "") {
   if (els.status) {
     els.status.className = tone;
   }
+  setText(els.topbarStatus, text);
+  if (els.topbarStatus) {
+    els.topbarStatus.className = `pill ${tone}`.trim();
+  }
 }
 
 export function connect() {
@@ -42,11 +46,17 @@ export function connect() {
   state.ws = new WebSocket(wsUrl(), "anonchat");
   setStatus("Connecting", "warn");
 
-  state.ws.onopen = () => {
+  state.ws.onopen = async () => {
     state.reconnectAttempts = 0;
-    setStatus("Online", "good");
-    flushWireQueue();
-    notifyHandlers("OPEN", []);
+    setStatus(state.session.sessionId && !state.serverSessionReady ? "Connecting" : "Online", state.serverSessionReady ? "good" : "warn");
+    await notifyHandlers("OPEN", []);
+    if (!state.session.sessionId) {
+      flushWireQueue();
+    }
+
+    if (!state.session.sessionId || state.serverSessionReady) {
+      setStatus("Online", "good");
+    }
   };
 
   state.ws.onclose = () => {
@@ -74,7 +84,7 @@ export function stopReconnect() {
 
 export function sendWire(text) {
   if (shouldHoldForSession(text)) {
-    state.wireQueue.push(text);
+    enqueueWire(text);
     connect();
     return true;
   }
@@ -84,7 +94,7 @@ export function sendWire(text) {
     return true;
   }
 
-  state.wireQueue.push(text);
+  enqueueWire(text);
   connect();
   return true;
 }
@@ -152,13 +162,27 @@ export function handleWireMessage(text) {
   notifyHandlers(parts[0], parts, text);
 }
 
-function notifyHandlers(type, parts, raw = "") {
+async function notifyHandlers(type, parts, raw = "") {
   const list = handlers.get(type) || [];
 
   for (const handler of list) {
-    Promise.resolve(handler(parts, raw)).catch(() => {
-      showToast(`Protocol handler failed: ${type}`, "error");
-    });
+    await Promise.resolve(handler(parts, raw)).catch(() => {});
+  }
+}
+
+function enqueueWire(text) {
+  if (!text) {
+    return;
+  }
+
+  if (state.wireQueue.includes(text)) {
+    return;
+  }
+
+  state.wireQueue.push(text);
+
+  while (state.wireQueue.length > MAX_WIRE_QUEUE) {
+    state.wireQueue.shift();
   }
 }
 
@@ -184,6 +208,7 @@ const AUTHENTICATED_COMMANDS = new Set([
   "KEY",
   "WHO",
   "DM",
+  "DM_RECEIVED",
   "DSIGNAL",
   "BACKUP_GET",
   "BACKUP_PUT",

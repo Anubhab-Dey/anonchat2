@@ -2,10 +2,10 @@ import { state, accountKeyForUsername, cleanUsername, clearSessionOnly } from ".
 import { els } from "./dom.js";
 import { bytesToBase64Url, deriveBits, hasWebCrypto } from "./crypto-box.js";
 import { sendHello, storeSessionFromAuth } from "./device-session.js";
-import { sendWire, waitForWire } from "./wire.js";
+import { flushWireQueue, sendWire, waitForWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { afterAuthBackupRestore, deriveAndStoreBackupKey } from "./backup.js";
-import { setupDirectIdentity } from "./direct.js";
+import { retryPendingDirectOutbox, setupDirectIdentity } from "./direct.js";
 import { showBanner } from "./ui.js";
 import { loadConversations, resetConversationUi } from "./conversations.js";
 import { dbPut, migrateUnscopedLocalData } from "./local-db.js";
@@ -63,6 +63,8 @@ export async function authenticate(command, username, password) {
     await migrateUnscopedLocalData(accountKeyForUsername(username));
   }
   await setupDirectIdentity();
+  flushWireQueue();
+  await retryPendingDirectOutbox();
   await afterAuthBackupRestore();
   await loadConversations();
   showToast("Ready", "success");
@@ -78,6 +80,10 @@ export function logoutLocalOnly() {
     expiresAt: 0,
     backupVersion: state.session.backupVersion,
   }).catch(() => {});
+  state.serverSessionReady = false;
+  if (state.ws && state.ws.readyState !== WebSocket.CLOSED) {
+    state.ws.close();
+  }
   clearSessionOnly();
   resetConversationUi();
   showToast("Signed out locally", "info");

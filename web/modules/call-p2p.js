@@ -160,7 +160,7 @@ async function sendSignal(peerId, value) {
 
 async function sendDirectSignal(username, publicWire, value) {
   if (!username || !publicWire) {
-    addSystemMessage("direct call recipient key missing");
+    addSystemMessage("call setup is not ready yet");
     return;
   }
 
@@ -171,7 +171,7 @@ async function sendDirectSignal(username, publicWire, value) {
 
 export async function handleSignal(peerId, payload) {
   if (!state.roomKeys || !state.roomKeys.signal) {
-    addSystemMessage("encrypted call setup ignored before room key was set");
+    addSystemMessage("enter the room before starting a call");
     return;
   }
 
@@ -518,10 +518,8 @@ function handlePeerConnectionState(peerId, value) {
       window.dispatchEvent(new CustomEvent("anonchat:p2p-state", { detail: { peerId, state: value, transport } }));
       if (transport === "server_relay") {
         setCallStatus("Connected", "good");
-        showToast("Connected through relay", "success");
       } else if (transport === "p2p") {
         setCallStatus("Connected", "good");
-        showToast("Connected directly", "success");
       } else if (state.pcs.get(peerId)?._relayOnly) {
         setCallStatus("Confirming relay...", "warn");
       } else {

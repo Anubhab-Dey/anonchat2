@@ -1,12 +1,23 @@
 import { state, accountSettingKey, cleanUsername, currentAccountKey, directConversationId } from "./state.js";
 import { els } from "./dom.js";
 import { base64UrlToText, textToBase64Url, encryptJson, decryptJson } from "./crypto-box.js";
-import { dbGet, dbPut } from "./local-db.js";
+import {
+  dbDeleteDirectOutbox,
+  dbGet,
+  dbGetAccountMessage,
+  dbGetDirectOutbox,
+  dbPut,
+  dbPutDirectOutbox,
+} from "./local-db.js";
 import { sendWire } from "./wire.js";
 import { showToast } from "./toast.js";
 import { upsertConversation, openConversation, persistMessage, updateMessageStatus } from "./conversations.js";
 import { notifyIfSubscribed } from "./notifications.js";
 import { ensureServerSessionReady } from "./device-session.js";
+
+const DIRECT_RETRY_BASE_MS = 8000;
+const DIRECT_RETRY_MAX_MS = 5 * 60 * 1000;
+let directRetryTimer = null;
 
 export async function setupDirectIdentity() {
   await ensureDirectIdentity();
@@ -178,27 +189,17 @@ export function handleDirectUserRejected(parts) {
 
 export async function handleDirectDeliveryFailed(parts) {
   const username = cleanUsername(parts[2] || "");
-  const id = username.toLowerCase();
-  let messageId = null;
-
-  if (id && state.pendingAcks.dm.has(id)) {
-    const pending = state.pendingAcks.dm.get(id) || [];
-    messageId = pending.shift() || null;
-    state.pendingAcks.dm.set(id, pending);
-  }
-
-  if (!messageId) {
-    for (const pending of state.pendingAcks.dm.values()) {
-      messageId = pending.shift() || null;
-
-      if (messageId) {
-        break;
-      }
-    }
-  }
+  const messageId = parts[3] || "";
 
   if (messageId) {
-    await updateMessageStatus(messageId, { status: "failed" });
+    const existingMessage = await dbGetAccountMessage(messageId);
+
+    if (existingMessage && existingMessage.status === "delivered") {
+      return;
+    }
+
+    await deferDirectOutboxRetry(messageId, { status: "pending" });
+    await updateMessageStatus(messageId, { status: "pending" });
   }
 
   showToast(username ? `${username} is offline` : "Message could not be delivered", "warning");
@@ -298,39 +299,93 @@ export async function sendDirectChat(username, text) {
     status: "pending",
   });
   const payload = await encryptJson(key, { id, sender: state.username, text, client_created_at: created });
-  const pending = state.pendingAcks.dm.get(peer.username.toLowerCase()) || [];
-  pending.push(id);
-  state.pendingAcks.dm.set(peer.username.toLowerCase(), pending);
-  sendWire(`DM|${peer.username}|${payload}`);
-  await updateMessageStatus(id, { client_sent_at: Date.now() });
+  const outboxRecord = {
+    id,
+    conversationId: directConversationId(peer.username),
+    target_username: peer.username,
+    encrypted_payload: payload,
+    status: "pending",
+    client_created_at: created,
+    client_sent_at: null,
+    server_sent_at: null,
+    delivered_at: null,
+    retry_count: 0,
+    next_retry_at: 0,
+  };
+  await dbPutDirectOutbox(outboxRecord);
+  await sendDirectOutboxRecord(outboxRecord);
   if (state.serverSessionReady) {
     requestDirectPeer(peer.username, { fresh: true }).catch(() => {});
   }
   await upsertConversation({ ...conversation, preview: text, updatedAt: created }, { silent: true });
 }
 
-export async function handleDirectAck(targetUsername, serverSentAt) {
-  const key = targetUsername.toLowerCase();
-  const pending = state.pendingAcks.dm.get(key) || [];
-  const id = pending.shift();
-  state.pendingAcks.dm.set(key, pending);
-
-  if (!id) {
+export async function handleDirectAck(targetUsername, messageId, serverSentAt) {
+  if (!messageId) {
     return;
   }
 
-  await updateMessageStatus(id, {
-    status: "sent",
-    server_sent_at: Number(serverSentAt || 0) || null,
+  const record = await getOutboxRecord(messageId);
+  const serverTime = Number(serverSentAt || 0) || null;
+  const existingMessage = await dbGetAccountMessage(messageId);
+
+  if (existingMessage && existingMessage.status === "delivered") {
+    return;
+  }
+
+  if (record && record.status !== "delivered") {
+    await dbPutDirectOutbox({
+      ...record,
+      target_username: cleanUsername(targetUsername || record.target_username),
+      status: "routed",
+      server_sent_at: serverTime,
+      next_retry_at: Date.now() + nextDirectRetryDelay(record.retry_count || 0),
+    });
+    scheduleDirectOutboxRetry();
+  }
+
+  await updateMessageStatus(messageId, {
+    status: "routed",
+    server_sent_at: serverTime,
   });
 }
 
-export async function handleDirectMessage(username, peerId, publicWire, payload) {
+export async function handleDirectReceipt(receiverUsername, messageId, serverReceivedAt) {
+  if (!messageId) {
+    return;
+  }
+
+  await dbDeleteDirectOutbox(messageId);
+  await updateMessageStatus(messageId, {
+    status: "delivered",
+    delivered_at: Number(serverReceivedAt || 0) || Date.now(),
+    delivered_by: cleanUsername(receiverUsername),
+  });
+}
+
+export async function handleDirectMessage(username, peerId, publicWire, messageId, payload) {
+  if (!messageId || !payload) {
+    throw new Error("direct message missing id");
+  }
+
   rememberDirectPeer(username, peerId, publicWire);
+  const conversationId = directConversationId(username);
+  const existing = await dbGetAccountMessage(messageId);
+
+  if (existing) {
+    sendWire(`DM_RECEIVED|${username}|${messageId}`);
+    return;
+  }
+
   const key = await deriveDirectKey(publicWire);
   const message = await decryptJson(key, payload);
+
+  if (message.id && message.id !== messageId) {
+    throw new Error("message id mismatch");
+  }
+
   const conversation = await upsertConversation({
-    id: directConversationId(username),
+    id: conversationId,
     kind: "dm",
     title: username,
     username,
@@ -338,14 +393,105 @@ export async function handleDirectMessage(username, peerId, publicWire, payload)
     updatedAt: message.client_created_at || Date.now(),
   });
   await persistMessage(conversation.id, {
-    id: message.id || crypto.randomUUID(),
+    id: messageId || message.id || crypto.randomUUID(),
     direction: "in",
     sender: username,
     text: message.text,
     client_created_at: message.client_created_at || null,
     status: "received",
   });
+  sendWire(`DM_RECEIVED|${username}|${messageId}`);
   await notifyIfSubscribed(`Message from ${username}`, message.text, conversation.id);
+}
+
+export async function retryPendingDirectOutbox() {
+  if (!state.authenticated || !state.serverSessionReady) {
+    return;
+  }
+
+  const now = Date.now();
+  const pending = (await dbGetDirectOutbox())
+    .filter((record) =>
+      record &&
+      record.id &&
+      record.encrypted_payload &&
+      record.target_username &&
+      record.status !== "delivered" &&
+      Number(record.next_retry_at || 0) <= now
+    )
+    .sort((a, b) => (a.client_created_at || 0) - (b.client_created_at || 0));
+
+  for (const record of pending.slice(0, 20)) {
+    await sendDirectOutboxRecord(record);
+  }
+}
+
+async function sendDirectOutboxRecord(record) {
+  if (!record || !record.id || !record.target_username || !record.encrypted_payload) {
+    return;
+  }
+
+  if (!(await ensureServerSessionReady())) {
+    await deferDirectOutboxRetry(record.id);
+    return;
+  }
+
+  const now = Date.now();
+  const retryCount = Number(record.retry_count || 0) + 1;
+  await dbPutDirectOutbox({
+    ...record,
+    status: record.status === "routed" ? "routed" : "pending",
+    client_sent_at: now,
+    retry_count: retryCount,
+    next_retry_at: now + nextDirectRetryDelay(retryCount),
+  });
+  sendWire(`DM|${record.target_username}|${record.id}|${record.encrypted_payload}`);
+  await updateMessageStatus(record.id, {
+    client_sent_at: now,
+    status: record.status === "routed" ? "routed" : "pending",
+  });
+  scheduleDirectOutboxRetry();
+}
+
+async function deferDirectOutboxRetry(messageId, patch = {}) {
+  const record = await getOutboxRecord(messageId);
+
+  if (!record) {
+    return;
+  }
+
+  const retryCount = Number(record.retry_count || 0);
+  await dbPutDirectOutbox({
+    ...record,
+    ...patch,
+    retry_count: retryCount,
+    next_retry_at: Date.now() + nextDirectRetryDelay(retryCount),
+  });
+  scheduleDirectOutboxRetry();
+}
+
+async function getOutboxRecord(messageId) {
+  if (!messageId) {
+    return null;
+  }
+
+  return (await dbGetDirectOutbox()).find((record) => record.id === messageId) || null;
+}
+
+function scheduleDirectOutboxRetry() {
+  clearTimeout(directRetryTimer);
+
+  if (!state.authenticated) {
+    return;
+  }
+
+  directRetryTimer = setTimeout(() => {
+    retryPendingDirectOutbox().catch(() => {});
+  }, 10000);
+}
+
+function nextDirectRetryDelay(retryCount) {
+  return Math.min(DIRECT_RETRY_MAX_MS, DIRECT_RETRY_BASE_MS * Math.max(1, retryCount || 1));
 }
 
 export async function encryptDirectSignal(username, publicWire, value) {

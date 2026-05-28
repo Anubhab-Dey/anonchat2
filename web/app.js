@@ -1,8 +1,8 @@
 import { state, activeConversation, accountKeyForUsername, accountSettingKey, clearSessionOnly } from "./modules/state.js";
 import { els } from "./modules/dom.js";
 import { openLocalDb, dbGet } from "./modules/local-db.js";
-import { connect, onWire, setStatus } from "./modules/wire.js";
-import { signup, login } from "./modules/auth.js";
+import { connect, flushWireQueue, onWire, setStatus } from "./modules/wire.js";
+import { signup, login, logoutLocalOnly } from "./modules/auth.js";
 import {
   loadSavedSession,
   refreshSession,
@@ -37,10 +37,12 @@ import {
   startDirectConversation,
   sendDirectChat,
   handleDirectAck,
+  handleDirectReceipt,
   handleDirectMessage,
   handleDirectDeliveryFailed,
   handleDirectUserRejected,
   rememberDirectPeer,
+  retryPendingDirectOutbox,
 } from "./modules/direct.js";
 import {
   initializeCalls,
@@ -48,6 +50,9 @@ import {
   startDirectCall,
   endCallSession,
   handleCallEvent,
+  minimizeCall,
+  toggleCamera,
+  toggleMicrophone,
 } from "./modules/calls.js";
 import { handleBackendRelayFrame, handleBackendRelayRejected } from "./modules/call-backend-relay.js";
 import {
@@ -70,12 +75,18 @@ import {
   resizeComposer,
   setIdentity,
   showBlockingScreen,
+  openNavigation,
+  closeNavigation,
 } from "./modules/ui.js";
 import { showToast } from "./modules/toast.js";
 
 let openingRefresh = false;
+let deferredInstallPrompt = null;
 
 function bindEvents() {
+  els.menuBtn.onclick = openNavigation;
+  els.closeMenuBtn.onclick = closeNavigation;
+  els.drawerBackdrop.onclick = closeNavigation;
   els.connectBtn.onclick = connect;
   els.signupBtn.onclick = () => signup().catch(() => showToast("Sign up failed", "error"));
   els.loginBtn.onclick = () => login().catch(() => showToast("Sign in failed", "error"));
@@ -90,11 +101,24 @@ function bindEvents() {
   els.startDmBtn.onclick = () => startDirectConversation().catch(() => showToast("Direct message setup failed", "error"));
   els.directCallBtn.onclick = () => startDirectCall().catch(() => showToast("Direct call setup failed", "error"));
   els.notificationBtn.onclick = () => toggleNotifications().catch(() => showToast("Notifications unavailable", "warning"));
+  els.installBtn.onclick = installApp;
+  els.signOutBtn.onclick = () => {
+    logoutLocalOnly();
+    closeNavigation();
+  };
+  els.clearDeviceMenuBtn.onclick = () => {
+    if (confirm("Clear AnonChat data from this device?")) {
+      clearThisDevice().catch(() => showToast("Could not clear this device", "error"));
+    }
+  };
   els.newRoomBtn.onclick = createNewRoom;
   els.joinBtn.onclick = () => joinRoom().catch(() => showToast("Could not enter room", "error"));
   els.copyInviteBtn.onclick = () => copyInvite().catch(() => showToast("Could not copy invite", "warning"));
   els.startCallBtn.onclick = () => startActiveCall().catch(() => showToast("Call setup failed", "error"));
   els.stopCallBtn.onclick = () => endCallSession();
+  els.micMuteBtn.onclick = toggleMicrophone;
+  els.cameraToggleBtn.onclick = toggleCamera;
+  els.pipCallBtn.onclick = () => minimizeCall().catch(() => {});
   els.attachBtn.onclick = () => els.fileInput.click();
   els.fileInput.onchange = updateSelectedFile;
   els.sendFileBtn.onclick = () => sendSelectedFile().catch(() => showToast("File send failed", "error"));
@@ -147,12 +171,31 @@ function bindEvents() {
     openConversation(conversation.id, { join: true })
       .catch(() => showToast("Could not join room", "error"));
   });
+  window.addEventListener("anonchat:navigation-used", closeNavigation);
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    if (els.installBtn) {
+      els.installBtn.disabled = false;
+    }
+  });
   window.addEventListener("anonchat:backup-imported", () => {
     loadConversations().catch(() => {});
   });
-  window.addEventListener("anonchat:session-refreshed", () => {
+  window.addEventListener("anonchat:session-refreshed", (event) => {
+    if (!event.detail || event.detail.serverReady !== true) {
+      return;
+    }
+
+    if (openingRefresh) {
+      return;
+    }
+
     setIdentity(state.username, "good");
-    setupDirectIdentity().catch(() => {});
+    setupDirectIdentity()
+      .then(flushWireQueue)
+      .then(retryPendingDirectOutbox)
+      .catch(() => {});
     loadConversations().catch(() => {});
     uploadBackupIfDirty().catch(() => {});
   });
@@ -178,8 +221,10 @@ function bindProtocol() {
       if (refreshed) {
         setIdentity(state.username, "good");
         await setupDirectIdentity();
+        flushWireQueue();
         await loadConversations();
         await uploadBackupIfDirty();
+        await retryPendingDirectOutbox();
       }
     } finally {
       openingRefresh = false;
@@ -207,7 +252,7 @@ function bindProtocol() {
     }
 
     if (parts[1] === "dm") {
-      handleDirectAck(parts[2], parts[3]);
+      handleDirectAck(parts[2], parts[3], parts[4]);
     }
   });
 
@@ -251,22 +296,25 @@ function bindProtocol() {
   });
   onWire("USER", (parts) => rememberDirectPeer(parts[1], parts[2], parts[3]));
   onWire("DM", (parts) => {
-    handleDirectMessage(parts[1], parts[2], parts[3], parts[4]).catch(() => {
+    handleDirectMessage(parts[1], parts[2], parts[3], parts[4], parts[5]).catch(() => {
       showToast("Could not decrypt direct message", "warning");
     });
   });
+  onWire("DM_RECEIPT", (parts) => {
+    handleDirectReceipt(parts[1], parts[2], parts[3]).catch(() => {});
+  });
   onWire("SIGNAL", (parts) => {
-    handleSignal(parts[1], parts[2]).catch(() => showToast("Call negotiation failed", "warning"));
+    handleSignal(parts[1], parts[2]).catch(() => showToast("Call could not connect", "warning"));
   });
   onWire("DSIGNAL", (parts) => {
-    handleDirectSignal(parts[1], parts[2], parts[3], parts[4]).catch(() => showToast("Direct call negotiation failed", "warning"));
+    handleDirectSignal(parts[1], parts[2], parts[3], parts[4]).catch(() => showToast("Call could not connect", "warning"));
   });
   onWire("CALL_EVENT", (parts) => {
     handleCallEvent(parts).catch(() => {});
   });
   onWire("CALL_RELAY", (parts) => {
     handleBackendRelayFrame(parts).catch(() => {
-      showToast("Audio relay interrupted", "warning");
+      showToast("Connection unstable", "warning");
     });
   });
 }
@@ -305,6 +353,17 @@ function registerServiceWorker() {
   }
 
   navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+async function installApp() {
+  if (!deferredInstallPrompt) {
+    showToast("Use your browser menu to install AnonChat", "info");
+    return;
+  }
+
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice.catch(() => {});
+  deferredInstallPrompt = null;
 }
 
 async function restoreLocalSessionSummary() {
