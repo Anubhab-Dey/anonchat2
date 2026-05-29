@@ -1,4 +1,4 @@
-const CACHE_NAME = "anonchat-static-v13";
+const CACHE_NAME = "anonchat-static-v14";
 const STATIC_ASSETS = [
   "/",
   "/index.html",

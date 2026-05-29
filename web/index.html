@@ -143,12 +143,21 @@
       </section>
 
       <aside class="activity" aria-label="Calls and files">
-        <section class="surface stack">
+        <section id="callPanel" class="surface stack call-panel">
           <div class="section-head">
             <h2>Call</h2>
             <span id="callStatus" class="pill">No call</span>
           </div>
-          <div class="call-controls" aria-label="Call controls">
+          <div class="call-summary">
+            <div id="callAvatar" class="call-avatar" aria-hidden="true">A</div>
+            <div class="call-copy">
+              <strong id="callTitle">Ready</strong>
+              <span id="callSubtitle">Choose someone to call</span>
+            </div>
+            <span id="callPrivacy" class="call-privacy">Private</span>
+          </div>
+          <div id="callNotice" class="call-notice" hidden></div>
+          <div id="callControls" class="call-controls" aria-label="Call controls" hidden>
             <button id="micMuteBtn" type="button" aria-pressed="false">Mute</button>
             <button id="cameraToggleBtn" type="button" aria-pressed="false">Camera off</button>
             <button id="pipCallBtn" type="button">Mini call</button>
@@ -157,9 +166,11 @@
             <button id="declineCallPanelBtn" type="button">Decline</button>
             <button id="acceptCallPanelBtn" class="primary-button" type="button">Accept</button>
           </div>
-          <button id="hangupCallBtn" class="danger-button" type="button" disabled>End call</button>
-          <video id="localVideo" autoplay muted playsinline></video>
-          <div id="remoteVideos" class="remote-videos"></div>
+          <button id="hangupCallBtn" class="danger-button" type="button" disabled hidden>End call</button>
+          <div id="callStage" class="call-stage" hidden>
+            <div id="remoteVideos" class="remote-videos"></div>
+            <video id="localVideo" class="local-preview" autoplay muted playsinline hidden></video>
+          </div>
         </section>
 
         <section class="surface stack">

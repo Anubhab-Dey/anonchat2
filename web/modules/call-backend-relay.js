@@ -307,6 +307,7 @@ function markBackendRelayConnected(callSession, options = {}) {
 
   if (callSession.selected_transport === "backend_relay") {
     callSession.media_mode = "audio_only";
+    window.dispatchEvent(new CustomEvent("anonchat:call-updated"));
     return;
   }
 
@@ -319,12 +320,14 @@ function markBackendRelayConnected(callSession, options = {}) {
   callSession.backend_relay_connected_at = Date.now();
   callSession.media_mode = "audio_only";
   clearTimeout(callSession.fallbackTimer);
-  setCallStatus("Audio call connected", "good");
+  setCallStatus("Audio connected", "good");
 
   if (!options.silent && !callSession._backendRelayToastShown) {
     callSession._backendRelayToastShown = true;
-    showToast("Audio-only relay call", "info");
+    showToast("Audio stayed connected", "info");
   }
+
+  window.dispatchEvent(new CustomEvent("anonchat:call-updated"));
 }
 
 function enqueuePlayback(relay, bytes, mimeType) {
@@ -573,6 +576,7 @@ function stopVideoForBackendRelay() {
 
   if (els.localVideo) {
     els.localVideo.srcObject = null;
+    els.localVideo.hidden = true;
   }
 }
 

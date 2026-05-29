@@ -21,6 +21,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -264,6 +268,73 @@ h2 {
 .call-actions {
   display: grid;
   gap: 8px;
+}
+
+.call-panel {
+  overflow: hidden;
+}
+
+.call-summary {
+  align-items: center;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  min-width: 0;
+}
+
+.call-avatar {
+  align-items: center;
+  background: var(--accent);
+  border-radius: 8px;
+  color: var(--accent-ink);
+  display: grid;
+  font-weight: 800;
+  height: 40px;
+  justify-items: center;
+  width: 40px;
+}
+
+.call-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.call-copy strong,
+.call-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-copy strong {
+  font-size: 15px;
+}
+
+.call-copy span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.call-privacy {
+  border: 1px solid rgba(65, 201, 143, 0.42);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 8px;
+}
+
+.call-notice {
+  border-left: 3px solid var(--gold);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+  padding-left: 10px;
+}
+
+.call-notice[hidden] {
+  display: none;
 }
 
 .call-controls {
@@ -580,7 +651,14 @@ h2 {
   padding: 12px;
 }
 
-video {
+.call-stage {
+  display: grid;
+  gap: 8px;
+  position: relative;
+}
+
+.call-stage video,
+.remote-videos video {
   width: 100%;
   aspect-ratio: 16 / 10;
   border: 1px solid var(--line);
@@ -588,11 +666,20 @@ video {
   background: #05080b;
 }
 
+.local-preview {
+  bottom: 10px;
+  box-shadow: 0 10px 24px var(--shadow);
+  max-width: min(36%, 132px);
+  position: absolute;
+  right: 10px;
+}
+
 .remote-videos:empty::before {
-  content: "No active video";
+  content: "Video appears here";
   color: var(--muted);
   border: 1px dashed var(--line);
   border-radius: 8px;
+  display: block;
   padding: 18px;
   text-align: center;
 }
@@ -824,6 +911,15 @@ a {
   .call-controls,
   .call-actions {
     grid-template-columns: 1fr;
+  }
+
+  .call-summary {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .call-privacy {
+    justify-self: start;
+    grid-column: 2;
   }
 
   .room-bar,

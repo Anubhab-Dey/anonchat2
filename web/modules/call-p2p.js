@@ -323,7 +323,7 @@ export async function prepareCallMedia() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
     state.localStream = stream;
     attachLocalPreview(stream);
-    setCallStatus("Connecting securely...", "warn");
+    setCallStatus("Starting video...", "warn");
     return { ok: true, stream, mediaMode: "audio_video", reason: null };
   } catch (error) {
     if (!shouldRetryAudioOnly(error)) {
@@ -335,8 +335,8 @@ export async function prepareCallMedia() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     state.localStream = stream;
     attachLocalPreview(stream);
-    showToast("Audio-only call", "info");
-    setCallStatus("Audio-only call", "warn");
+    showToast("Audio call", "info");
+    setCallStatus("Audio call", "warn");
     return { ok: true, stream, mediaMode: "audio_only", reason: null };
   } catch (error) {
     return failCallMedia(error);
@@ -367,7 +367,9 @@ function attachLocalPreview(stream) {
     return;
   }
 
-  els.localVideo.srcObject = hasUsableVideo(stream) ? stream : null;
+  const hasVideo = hasUsableVideo(stream);
+  els.localVideo.srcObject = hasVideo ? stream : null;
+  els.localVideo.hidden = !hasVideo;
 }
 
 function hasUsableAudio(stream) {
@@ -437,6 +439,7 @@ export function stopP2PMedia() {
 
   state.localStream = null;
   els.localVideo.srcObject = null;
+  els.localVideo.hidden = true;
   els.remoteVideos.textContent = "";
   resetPeerConnections();
 }
@@ -521,7 +524,7 @@ function handlePeerConnectionState(peerId, value) {
       } else if (transport === "p2p") {
         setCallStatus("Connected", "good");
       } else if (state.pcs.get(peerId)?._relayOnly) {
-        setCallStatus("Confirming relay...", "warn");
+        setCallStatus("Finalizing call...", "warn");
       } else {
         setCallStatus("Connected", "good");
       }

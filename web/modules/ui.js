@@ -6,7 +6,7 @@ export function setIdentity(text, tone = "") {
 }
 
 export function setCallStatus(text, tone = "") {
-  setPill(els.callStatus, text, tone);
+  setPill(els.callStatus, text === "idle" ? "No call" : text, tone);
 }
 
 export function showBanner(text, tone = "warn") {

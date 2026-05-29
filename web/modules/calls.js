@@ -66,27 +66,42 @@ export function initializeCalls() {
   window.addEventListener("anonchat:p2p-state", (event) => {
     handleP2PState(event.detail.peerId, event.detail.state, event.detail.transport);
   });
+  window.addEventListener("anonchat:call-updated", () => {
+    renderCallControls();
+  });
 }
 
 function renderCallControls(callSession = state.calls.active) {
   const incoming = Boolean(callSession && callSession.incoming && callSession.call_state === "ringing");
   const active = Boolean(callSession && callSession.call_state !== "ended" && callSession.call_state !== "failed");
+  const inProgress = active && !incoming;
   const backendRelay = callSession && callSession.selected_transport === "backend_relay";
+
+  renderCallSummary(callSession);
 
   if (els.incomingCallControls) {
     els.incomingCallControls.hidden = !incoming;
   }
 
+  if (els.callControls) {
+    els.callControls.hidden = !inProgress;
+  }
+
+  if (els.callStage) {
+    els.callStage.hidden = !inProgress;
+  }
+
   if (els.hangupCallBtn) {
-    els.hangupCallBtn.disabled = !active;
+    els.hangupCallBtn.hidden = !inProgress;
+    els.hangupCallBtn.disabled = !inProgress;
   }
 
   if (els.micMuteBtn) {
-    els.micMuteBtn.disabled = !active || !state.localStream;
+    els.micMuteBtn.disabled = !inProgress || !state.localStream;
   }
 
   if (els.cameraToggleBtn) {
-    els.cameraToggleBtn.disabled = !active || !state.localStream || backendRelay;
+    els.cameraToggleBtn.disabled = !inProgress || !state.localStream || backendRelay;
     if (backendRelay) {
       els.cameraToggleBtn.textContent = "Audio only";
       els.cameraToggleBtn.setAttribute("aria-pressed", "false");
@@ -99,6 +114,107 @@ function renderCallControls(callSession = state.calls.active) {
       els.cameraToggleBtn.setAttribute("aria-pressed", String(!hasEnabledVideo));
     }
   }
+}
+
+function renderCallSummary(callSession = state.calls.active) {
+  const active = Boolean(callSession && callSession.call_state !== "ended" && callSession.call_state !== "failed");
+  const name = callParticipantName(callSession);
+  const subtitle = callSubtitle(callSession);
+  const notice = callNotice(callSession);
+  const avatarText = name && name !== "Ready" ? name.slice(0, 1).toUpperCase() : "A";
+
+  if (els.callPanel) {
+    els.callPanel.dataset.callState = callSession ? callSession.call_state || "idle" : "idle";
+  }
+
+  if (els.callAvatar) {
+    els.callAvatar.textContent = avatarText;
+  }
+
+  if (els.callTitle) {
+    els.callTitle.textContent = active ? name : "Ready";
+  }
+
+  if (els.callSubtitle) {
+    els.callSubtitle.textContent = active ? subtitle : "Choose someone to call";
+  }
+
+  if (els.callPrivacy) {
+    els.callPrivacy.hidden = !active;
+    els.callPrivacy.textContent = "Private";
+  }
+
+  if (els.callNotice) {
+    els.callNotice.hidden = !notice;
+    els.callNotice.textContent = notice || "";
+  }
+}
+
+function callParticipantName(callSession) {
+  if (!callSession) {
+    return "Ready";
+  }
+
+  if (callSession.call_kind === "room") {
+    return callSession.room || callSession.target || "Room call";
+  }
+
+  return callSession.callee_username ||
+    callSession.caller_username ||
+    callSession.target ||
+    "Private call";
+}
+
+function callSubtitle(callSession) {
+  if (!callSession) {
+    return "Choose someone to call";
+  }
+
+  if (callSession.call_state === "ringing") {
+    return "Wants to talk";
+  }
+
+  if (callSession.call_state === "calling") {
+    return "Ringing";
+  }
+
+  if (callSession.call_state === "connecting_p2p" ||
+      callSession.call_state === "connecting_relay" ||
+      callSession.call_state === "reconnecting") {
+    return callSession.media_mode === "audio_only" ? "Connecting audio" : "Connecting video";
+  }
+
+  if (callSession.call_state === "connecting_backend_relay") {
+    return "Keeping audio connected";
+  }
+
+  if (callSession.selected_transport === "backend_relay") {
+    return "Audio connected";
+  }
+
+  if (callSession.call_state === "connected_p2p" ||
+      callSession.call_state === "connected_relay") {
+    return callSession.media_mode === "audio_only" ? "Audio connected" : "Video connected";
+  }
+
+  return "Preparing call";
+}
+
+function callNotice(callSession) {
+  if (!callSession) {
+    return "";
+  }
+
+  if (callSession.selected_transport === "backend_relay" ||
+      callSession.call_state === "connecting_backend_relay") {
+    return "Audio stayed connected while video could not.";
+  }
+
+  if (callSession.call_state === "reconnecting") {
+    return "Connection changed. Keeping the call alive.";
+  }
+
+  return "";
 }
 
 export function createCallSession(options) {
@@ -273,7 +389,8 @@ async function startServerRelayCall(callSession, options = {}) {
   const shouldSendInvite = options.sendInvite !== false;
   callSession.call_state = callSession.accepted_at ? "connecting_backend_relay" : "calling";
   callSession.backend_relay_waiting_for_accept = !callSession.accepted_at;
-  setCallStatus(callSession.accepted_at ? "Connecting call..." : "Calling...", "warn");
+  setCallStatus(callSession.accepted_at ? "Connecting audio..." : "Calling...", "warn");
+  renderCallControls(callSession);
 
   if (shouldSendInvite) {
     await sendCallInvite(callSession).catch(() => {});
@@ -305,7 +422,8 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
   callSession.peerIds = callSession.call_kind === "direct" ?
     [callSession.peerId].filter(Boolean) :
     [...(roomPeerIds || [...state.peers.keys()])];
-  setCallStatus(callSession.call_kind === "direct" && !callSession.accepted_at ? "Calling..." : "Connecting...", "warn");
+  setCallStatus(callSession.call_kind === "direct" && !callSession.accepted_at ? "Calling..." : "Starting video...", "warn");
+  renderCallControls(callSession);
   scheduleP2PFallback(callSession);
 
   if (shouldSendInvite) {
@@ -426,8 +544,9 @@ export async function startRelayFallback(callSession) {
 
   callSession.call_state = "connecting_relay";
   callSession.relay_started_at = Date.now();
-  setCallStatus("Connecting securely...", "warn");
-  showToast("Still connecting call...", "info");
+  setCallStatus("Improving connection...", "warn");
+  showToast("Improving connection...", "info");
+  renderCallControls(callSession);
   scheduleRelayFallback(callSession);
 
   if (callSession.call_kind === "direct") {
@@ -499,6 +618,7 @@ async function startBackendRelayFallback(callSession) {
   if (!callSession.accepted_at) {
     callSession.backend_relay_waiting_for_accept = true;
     setCallStatus("Waiting for answer...", "warn");
+    renderCallControls(callSession);
     return;
   }
 
@@ -513,7 +633,8 @@ async function startBackendRelayFallback(callSession) {
   callSession.call_state = "connecting_backend_relay";
   callSession.backend_relay_started_at = Date.now();
   callSession.media_mode = "audio_only";
-  setCallStatus("Connecting audio call...", "warn");
+  setCallStatus("Keeping audio...", "warn");
+  renderCallControls(callSession);
 
   if (callSession.call_kind === "direct") {
     closePeer(callSession.peerId);
@@ -685,6 +806,7 @@ export async function handleCallEvent(parts) {
       }
 
       session.call_state = "connecting_p2p";
+      renderCallControls(session);
       scheduleP2PFallback(session);
 
       if (session.backend_relay_waiting_for_accept) {
@@ -850,6 +972,7 @@ function handleP2PState(peerId, value, transport = null) {
 
     callSession.call_state = "reconnecting";
     setCallStatus("Reconnecting...", "warn");
+    renderCallControls(callSession);
     setTimeout(() => {
       if (!callSession.selected_transport) {
         startRelayFallback(callSession).catch(() => {
