@@ -86,9 +86,9 @@ window.ANONCHAT_CONFIG = {
 };
 ```
 
-That is more private, but direct peer-to-peer WebRTC may only work on the same machine or LAN. The call order is direct WebRTC first, then relay-only WebRTC through a configured first-party TURN server, then the app server's opaque `CALL_RELAY` fallback. TURN relays encrypted DTLS-SRTP packets and does not decrypt call media. The app server fallback relays browser-encrypted media chunks and also does not decrypt call media.
+That is more private, but direct peer-to-peer WebRTC may only work on the same machine or LAN. The call order is direct WebRTC first, then relay-only WebRTC through a configured first-party TURN server, then the app server's opaque audio-only `CALL_RELAY` fallback. TURN relays encrypted DTLS-SRTP packets and does not decrypt call media. The app server fallback relays browser-encrypted audio chunks and also does not decrypt call audio.
 
-For better internet call reliability, deploy a first-party TURN server such as coturn and add its `turn:` or `turns:` URLs to [web/config.js](web/config.js). Without TURN, calls can still fall back to the encrypted app-server relay after both sides accept the call, but that path is a heavier compatibility fallback rather than the preferred transport.
+For better internet call reliability, deploy a first-party TURN server such as coturn and add its `turn:` or `turns:` URLs to [web/config.js](web/config.js). Without TURN, calls can still fall back to the encrypted app-server audio relay after both sides accept the call, but that path is a heavier compatibility fallback rather than the preferred transport.
 
 ## Important Limits
 

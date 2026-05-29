@@ -49,7 +49,8 @@ export async function startBackendMediaRelay(callSession, options = {}) {
     return false;
   }
 
-  relay.mediaMode = tracks.video.length > 0 ? "audio_video" : "audio_only";
+  stopVideoForBackendRelay();
+  relay.mediaMode = "audio_only";
   callSession.media_mode = relay.mediaMode;
   markBackendRelayConnected(callSession, { ...options, mediaMode: relay.mediaMode });
 
@@ -57,7 +58,7 @@ export async function startBackendMediaRelay(callSession, options = {}) {
     return true;
   }
 
-  const relayStream = new MediaStream([...tracks.audio, ...tracks.video]);
+  const relayStream = new MediaStream(tracks.audio);
   const mimeType = chooseMediaMimeType(relay.mediaMode);
   const recorder = createMediaRecorder(relayStream, relay.mediaMode, mimeType);
 
@@ -577,6 +578,20 @@ function liveMediaTracks() {
     audio: state.localStream.getAudioTracks().filter((track) => track.readyState === "live"),
     video: state.localStream.getVideoTracks().filter((track) => track.readyState === "live" && track.enabled !== false),
   };
+}
+
+function stopVideoForBackendRelay() {
+  if (!state.localStream) {
+    return;
+  }
+
+  for (const track of state.localStream.getVideoTracks()) {
+    track.stop();
+  }
+
+  if (els.localVideo) {
+    els.localVideo.srcObject = null;
+  }
 }
 
 function chooseMediaMimeType(mediaMode) {

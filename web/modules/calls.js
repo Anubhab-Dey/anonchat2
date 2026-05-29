@@ -35,6 +35,7 @@ import { startBackendMediaRelay, stopBackendAudioRelay } from "./call-backend-re
 import { ensureServerSessionReady } from "./device-session.js";
 
 const P2P_TIMEOUT_MS = 10000;
+const RELAY_TIMEOUT_MS = 7000;
 
 export function initializeCalls() {
   setPeerCallHandler((peerId) => startRoomCall(peerId).catch(() => {
@@ -289,6 +290,27 @@ function scheduleP2PFallback(callSession, delay = P2P_TIMEOUT_MS) {
   }, delay);
 }
 
+function scheduleRelayFallback(callSession, delay = RELAY_TIMEOUT_MS) {
+  clearTimeout(callSession.fallbackTimer);
+
+  if (!callSession ||
+      callSession.selected_transport ||
+      callSession.call_state === "ended" ||
+      callSession.call_state === "failed") {
+    return;
+  }
+
+  callSession.fallbackTimer = setTimeout(() => {
+    if (!callSession.selected_transport && callSession.call_state === "connecting_relay") {
+      startBackendRelayFallback(callSession).catch(() => {
+        callSession.call_state = "failed";
+        callSession.ended_at = Date.now();
+        setCallStatus("Could not connect", "bad");
+      });
+    }
+  }, delay);
+}
+
 function shouldStartP2PFallbackTimer(callSession) {
   if (!callSession ||
       callSession.selected_transport ||
@@ -342,6 +364,7 @@ export async function startRelayFallback(callSession) {
   callSession.relay_started_at = Date.now();
   setCallStatus("Connecting securely...", "warn");
   showToast("Still connecting call...", "info");
+  scheduleRelayFallback(callSession);
 
   if (callSession.call_kind === "direct") {
     if (!callSession.peerId || !callSession.peerPublicWire) {
@@ -386,6 +409,8 @@ async function startBackendRelayFallback(callSession) {
       callSession.call_state === "failed") {
     return;
   }
+
+  clearTimeout(callSession.fallbackTimer);
 
   if (!backendRelayFallbackEnabled()) {
     callSession.call_state = "failed";

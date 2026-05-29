@@ -10,8 +10,8 @@ Current state:
 - The app attempts WebRTC normally first, allowing host/server-reflexive candidates to win.
 - If direct connectivity fails and trusted TURN servers are configured, ICE can select relay candidates automatically.
 - The UI can report direct or relayed connection by inspecting the selected ICE candidate pair.
-- If no TURN route is available for an accepted call, the C server can relay opaque app-encrypted media frames over `CALL_RELAY`.
-- Backend relay chunks are encrypted in the browser with the direct ECDH key or room signaling key before the server sees them.
+- If no TURN route is available for an accepted call, the C server can relay opaque app-encrypted audio frames over `CALL_RELAY`.
+- Backend audio chunks are encrypted in the browser with the direct ECDH key or room signaling key before the server sees them.
 - The C server must never decrypt, parse, log, or persist relayed media frames.
 
 Next pass:
@@ -25,8 +25,8 @@ Next pass:
 Current state:
 - The backend keeps `CALL_INVITE`, `CALL_ACCEPT`, `CALL_DECLINE`, and `CALL_END`.
 - These commands carry opaque encrypted payloads and are for call state/ringer/event flow only.
-- Media fallback order is WebRTC P2P, WebRTC TURN when configured, then backend relay.
-- Backend relay uses `CALL_RELAY` only for opaque encrypted media chunks after the call is accepted.
+- Media fallback order is WebRTC P2P, WebRTC TURN when configured, then backend audio relay.
+- Backend relay uses `CALL_RELAY` only for opaque encrypted audio chunks after the call is accepted.
 - Incoming call invites are classified from decrypted invite metadata, not from direct-user lookup guesses.
 - The browser can restart call peer connections with relay-only ICE when trusted TURN servers are configured.
 
