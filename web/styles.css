@@ -260,13 +260,22 @@ h2 {
 }
 
 .settings-actions,
-.call-controls {
+.call-controls,
+.call-actions {
   display: grid;
   gap: 8px;
 }
 
 .call-controls {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.call-actions {
+  grid-template-columns: 1fr 1fr;
+}
+
+.call-actions[hidden] {
+  display: none;
 }
 
 .pill {
@@ -313,6 +322,13 @@ h2 {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
+  font-weight: 700;
+}
+
+.danger-button {
+  background: #3a1618;
+  border-color: rgba(255, 111, 111, 0.62);
+  color: #ffd4d4;
   font-weight: 700;
 }
 
@@ -805,7 +821,8 @@ a {
 
   .activity,
   .room-actions,
-  .call-controls {
+  .call-controls,
+  .call-actions {
     grid-template-columns: 1fr;
   }
 

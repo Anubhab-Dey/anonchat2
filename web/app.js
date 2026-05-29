@@ -116,6 +116,7 @@ function bindEvents() {
   els.copyInviteBtn.onclick = () => copyInvite().catch(() => showToast("Could not copy invite", "warning"));
   els.startCallBtn.onclick = () => startActiveCall().catch(() => showToast("Call setup failed", "error"));
   els.stopCallBtn.onclick = () => endCallSession();
+  els.hangupCallBtn.onclick = () => endCallSession();
   els.micMuteBtn.onclick = toggleMicrophone;
   els.cameraToggleBtn.onclick = toggleCamera;
   els.pipCallBtn.onclick = () => minimizeCall().catch(() => {});

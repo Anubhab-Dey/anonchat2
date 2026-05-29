@@ -1,7 +1,6 @@
 window.ANONCHAT_CONFIG = {
-  // Add trusted first-party STUN/TURN servers here at deployment time.
-  // Example:
-  // iceServers: [{ urls: ["turns:turn.example.com:5349"], username: "...", credential: "..." }]
+  // Keep this tracked default private by default. Deployment TURN credentials
+  // belong in /local-config.js, which is intentionally ignored by git.
   iceServers: [],
   relayFallbackEnabled: true,
   backendRelayFallbackEnabled: true,

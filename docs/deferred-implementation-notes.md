@@ -6,19 +6,19 @@ These notes capture intentionally deferred work so the next pass can continue wi
 
 Current state:
 - Calls use WebRTC media first.
-- ICE servers are read from `web/config.js` through `window.ANONCHAT_CONFIG`.
+- ICE servers are read from `window.ANONCHAT_CONFIG`, with `web/config.js` as the tracked default and `web/local-config.js` as the ignored deployment override.
 - The app attempts WebRTC normally first, allowing host/server-reflexive candidates to win.
 - If direct connectivity fails and trusted TURN servers are configured, ICE can select relay candidates automatically.
 - The UI can report direct or relayed connection by inspecting the selected ICE candidate pair.
 - If no TURN route is available for an accepted call, the C server can relay opaque app-encrypted audio frames over `CALL_RELAY`.
 - Backend audio chunks are encrypted in the browser with the direct ECDH key or room signaling key before the server sees them.
 - The C server must never decrypt, parse, log, or persist relayed media frames.
+- TURN deployment notes and a coturn config template live in `ops/coturn/`.
 
 Next pass:
 1. Deploy a first-party TURN service, preferably with TLS (`turns:`) and short-lived credentials.
-2. Generate/serve TURN credentials from trusted server-side deployment config instead of committing static secrets.
+2. Generate/serve TURN credentials from trusted server-side deployment config instead of manually editing `web/local-config.js`.
 3. Keep media in WebRTC DTLS-SRTP; the TURN server must only relay encrypted packets.
-4. Add an operations guide for recommended coturn hardening, logging limits, and credential rotation.
 
 ## Call Ringer And State Flow
 

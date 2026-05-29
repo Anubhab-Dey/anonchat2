@@ -1,4 +1,4 @@
-const CACHE_NAME = "anonchat-static-v10";
+const CACHE_NAME = "anonchat-static-v12";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
@@ -44,6 +44,20 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET" || event.request.url.includes("/ws")) {
+    return;
+  }
+
+  const url = new URL(event.request.url);
+  if (url.pathname === "/local-config.js") {
+    event.respondWith(
+      fetch(event.request, { cache: "no-store" })
+        .then((response) =>
+          response.ok
+            ? response
+            : new Response("", { headers: { "content-type": "application/javascript" } })
+        )
+        .catch(() => new Response("", { headers: { "content-type": "application/javascript" } }))
+    );
     return;
   }
 

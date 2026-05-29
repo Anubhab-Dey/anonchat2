@@ -12,7 +12,6 @@ const MAX_CALL_RELAY_WIRE_BYTES = 240 * 1024;
 const MAX_PLAYBACK_QUEUE = 64;
 const MAX_BUFFER_SECONDS = 45;
 const AUDIO_BITRATE = 32000;
-const VIDEO_BITRATE = 360000;
 const relaySessions = new Map();
 
 export async function startBackendMediaRelay(callSession, options = {}) {
@@ -52,15 +51,15 @@ export async function startBackendMediaRelay(callSession, options = {}) {
   stopVideoForBackendRelay();
   relay.mediaMode = "audio_only";
   callSession.media_mode = relay.mediaMode;
-  markBackendRelayConnected(callSession, { ...options, mediaMode: relay.mediaMode });
+  markBackendRelayConnected(callSession, options);
 
   if (relay.recorder && relay.recorder.state === "recording") {
     return true;
   }
 
   const relayStream = new MediaStream(tracks.audio);
-  const mimeType = chooseMediaMimeType(relay.mediaMode);
-  const recorder = createMediaRecorder(relayStream, relay.mediaMode, mimeType);
+  const mimeType = chooseMediaMimeType();
+  const recorder = createMediaRecorder(relayStream, mimeType);
 
   if (!recorder) {
     setCallStatus("Could not connect", "bad");
@@ -69,7 +68,7 @@ export async function startBackendMediaRelay(callSession, options = {}) {
   }
 
   relay.recorder = recorder;
-  relay.mimeType = recorder.mimeType || mimeType || defaultMimeType(relay.mediaMode);
+  relay.mimeType = recorder.mimeType || mimeType || defaultMimeType();
   relay.stopped = false;
 
   recorder.ondataavailable = (event) => {
@@ -133,13 +132,13 @@ export async function handleBackendRelayFrame(parts) {
     return;
   }
 
-  markBackendRelayConnected(callSession, { silent: true, mediaMode: payload.media_mode });
+  markBackendRelayConnected(callSession, { silent: true });
 
   if (!hasLocalRecorder(callSession.call_id) && callSession.accepted_at) {
     startBackendMediaRelay(callSession, { silent: true }).catch(() => {});
   }
 
-  enqueuePlayback(relay, base64UrlToBytes(payload.bytes), payload.mimeType || defaultMimeType(payload.media_mode), payload.media_mode);
+  enqueuePlayback(relay, base64UrlToBytes(payload.bytes), payload.mimeType || defaultMimeType());
 }
 
 export function stopBackendAudioRelay(callSession = null) {
@@ -201,8 +200,8 @@ async function ensureRelaySession(callSession, options = {}) {
       key,
       sequence: 0,
       recorder: null,
-      mimeType: defaultMimeType(callSession.media_mode || "audio_only"),
-      mediaMode: callSession.media_mode || "audio_only",
+      mimeType: defaultMimeType(),
+      mediaMode: "audio_only",
       stopped: false,
       sendWarned: false,
       playWarned: false,
@@ -306,13 +305,8 @@ function markBackendRelayConnected(callSession, options = {}) {
     return;
   }
 
-  const mediaMode = options.mediaMode || callSession.media_mode || "audio_only";
-
   if (callSession.selected_transport === "backend_relay") {
-    if (mediaMode === "audio_video" && callSession.media_mode !== "audio_video") {
-      callSession.media_mode = "audio_video";
-      setCallStatus("Video call connected", "good");
-    }
+    callSession.media_mode = "audio_only";
     return;
   }
 
@@ -323,18 +317,18 @@ function markBackendRelayConnected(callSession, options = {}) {
   callSession.call_state = "connected_backend_relay";
   callSession.selected_transport = "backend_relay";
   callSession.backend_relay_connected_at = Date.now();
-  callSession.media_mode = mediaMode;
+  callSession.media_mode = "audio_only";
   clearTimeout(callSession.fallbackTimer);
-  setCallStatus(mediaMode === "audio_video" ? "Video call connected" : "Audio call connected", "good");
+  setCallStatus("Audio call connected", "good");
 
   if (!options.silent && !callSession._backendRelayToastShown) {
     callSession._backendRelayToastShown = true;
-    showToast(mediaMode === "audio_video" ? "Video relay call" : "Audio-only relay call", "info");
+    showToast("Audio-only relay call", "info");
   }
 }
 
-function enqueuePlayback(relay, bytes, mimeType, mediaMode) {
-  relay.mediaMode = mediaMode || relay.mediaMode || "audio_only";
+function enqueuePlayback(relay, bytes, mimeType) {
+  relay.mediaMode = "audio_only";
 
   if (!relay.mseFailed &&
       window.MediaSource &&
@@ -481,18 +475,6 @@ function ensurePlaybackElement(relay) {
     return relay.playbackElement;
   }
 
-  if (relay.mediaMode === "audio_video") {
-    const video = document.createElement("video");
-    video.autoplay = true;
-    video.playsInline = true;
-    video.dataset.backendRelay = relay.callId;
-    video.className = "backend-relay-video";
-    relay.playbackElement = video;
-    relay.playbackElementOwned = true;
-    els.remoteVideos.appendChild(video);
-    return video;
-  }
-
   relay.playbackElement = new Audio();
   relay.playbackElement.autoplay = true;
   relay.playbackElementOwned = false;
@@ -564,7 +546,7 @@ function validMediaPayload(payload, callId, sequence) {
     (payload.type === "media_chunk" || legacyAudio) &&
     payload.call_id === callId &&
     String(payload.sequence) === String(sequence) &&
-    (mediaMode === "audio_only" || mediaMode === "audio_video") &&
+    mediaMode === "audio_only" &&
     typeof payload.mimeType === "string" &&
     typeof payload.bytes === "string";
 }
@@ -594,12 +576,8 @@ function stopVideoForBackendRelay() {
   }
 }
 
-function chooseMediaMimeType(mediaMode) {
-  const candidates = mediaMode === "audio_video" ? [
-    "video/webm;codecs=vp8,opus",
-    "video/webm;codecs=vp8",
-    "video/webm",
-  ] : [
+function chooseMediaMimeType() {
+  const candidates = [
     "audio/webm;codecs=opus",
     "audio/webm",
   ];
@@ -611,19 +589,14 @@ function chooseMediaMimeType(mediaMode) {
   return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
 }
 
-function createMediaRecorder(stream, mediaMode, mimeType) {
+function createMediaRecorder(stream, mimeType) {
   const options = {};
 
   if (mimeType) {
     options.mimeType = mimeType;
   }
 
-  if (mediaMode === "audio_video") {
-    options.audioBitsPerSecond = AUDIO_BITRATE;
-    options.videoBitsPerSecond = VIDEO_BITRATE;
-  } else {
-    options.audioBitsPerSecond = AUDIO_BITRATE;
-  }
+  options.audioBitsPerSecond = AUDIO_BITRATE;
 
   try {
     return new MediaRecorder(stream, options);
@@ -646,8 +619,8 @@ function createMediaRecorder(stream, mediaMode, mimeType) {
   }
 }
 
-function defaultMimeType(mediaMode) {
-  return mediaMode === "audio_video" ? "video/webm" : "audio/webm";
+function defaultMimeType() {
+  return "audio/webm";
 }
 
 function isExpectedSender(callSession, fromUsername) {

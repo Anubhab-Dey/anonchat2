@@ -38,12 +38,66 @@ const P2P_TIMEOUT_MS = 10000;
 const RELAY_TIMEOUT_MS = 7000;
 
 export function initializeCalls() {
+  renderCallControls();
+  if (els.acceptCallPanelBtn) {
+    els.acceptCallPanelBtn.onclick = () => {
+      const session = state.calls.active;
+      if (session && session.incoming && session.call_state === "ringing") {
+        acceptIncomingCall(session).catch(() => {
+          setCallStatus("Could not connect", "bad");
+          showToast("Could not connect", "error");
+        });
+      }
+    };
+  }
+  if (els.declineCallPanelBtn) {
+    els.declineCallPanelBtn.onclick = () => {
+      const session = state.calls.active;
+      if (session && session.incoming && session.call_state === "ringing") {
+        declineIncomingCall(session).catch(() => {});
+      }
+    };
+  }
   setPeerCallHandler((peerId) => startRoomCall(peerId).catch(() => {
     setCallStatus("Could not connect", "bad");
+    renderCallControls();
   }));
   window.addEventListener("anonchat:p2p-state", (event) => {
     handleP2PState(event.detail.peerId, event.detail.state, event.detail.transport);
   });
+}
+
+function renderCallControls(callSession = state.calls.active) {
+  const incoming = Boolean(callSession && callSession.incoming && callSession.call_state === "ringing");
+  const active = Boolean(callSession && callSession.call_state !== "ended" && callSession.call_state !== "failed");
+  const backendRelay = callSession && callSession.selected_transport === "backend_relay";
+
+  if (els.incomingCallControls) {
+    els.incomingCallControls.hidden = !incoming;
+  }
+
+  if (els.hangupCallBtn) {
+    els.hangupCallBtn.disabled = !active;
+  }
+
+  if (els.micMuteBtn) {
+    els.micMuteBtn.disabled = !active || !state.localStream;
+  }
+
+  if (els.cameraToggleBtn) {
+    els.cameraToggleBtn.disabled = !active || !state.localStream || backendRelay;
+    if (backendRelay) {
+      els.cameraToggleBtn.textContent = "Audio only";
+      els.cameraToggleBtn.setAttribute("aria-pressed", "false");
+    } else {
+      const hasEnabledVideo = Boolean(
+        state.localStream &&
+        state.localStream.getVideoTracks().some((track) => track.readyState === "live" && track.enabled !== false)
+      );
+      els.cameraToggleBtn.textContent = hasEnabledVideo ? "Camera off" : "Camera on";
+      els.cameraToggleBtn.setAttribute("aria-pressed", String(!hasEnabledVideo));
+    }
+  }
 }
 
 export function createCallSession(options) {
@@ -75,6 +129,7 @@ export function createCallSession(options) {
   };
   state.calls.sessions.set(session.call_id, session);
   state.calls.active = session;
+  renderCallControls(session);
   return session;
 }
 
@@ -237,6 +292,7 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
   if (!media.ok) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
+    renderCallControls(callSession);
     return;
   }
 
@@ -285,6 +341,7 @@ function scheduleP2PFallback(callSession, delay = P2P_TIMEOUT_MS) {
         callSession.call_state = "failed";
         callSession.ended_at = Date.now();
         setCallStatus("Could not connect", "bad");
+        renderCallControls(callSession);
       });
     }
   }, delay);
@@ -306,6 +363,7 @@ function scheduleRelayFallback(callSession, delay = RELAY_TIMEOUT_MS) {
         callSession.call_state = "failed";
         callSession.ended_at = Date.now();
         setCallStatus("Could not connect", "bad");
+        renderCallControls(callSession);
       });
     }
   }, delay);
@@ -338,6 +396,7 @@ export async function startRelayFallback(callSession) {
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
     showToast("Could not connect", "warning");
+    renderCallControls(callSession);
     return;
   }
 
@@ -355,6 +414,7 @@ export async function startRelayFallback(callSession) {
   if (!media.ok) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
+    renderCallControls(callSession);
     return;
   }
 
@@ -371,6 +431,7 @@ export async function startRelayFallback(callSession) {
       callSession.call_state = "failed";
       callSession.ended_at = Date.now();
       setCallStatus("Could not connect", "bad");
+      renderCallControls(callSession);
       return;
     }
 
@@ -390,6 +451,7 @@ export async function startRelayFallback(callSession) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
+    renderCallControls(callSession);
     return;
   }
 
@@ -417,6 +479,7 @@ async function startBackendRelayFallback(callSession) {
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
     showToast("Call could not connect", "warning");
+    renderCallControls(callSession);
     return;
   }
 
@@ -425,6 +488,7 @@ async function startBackendRelayFallback(callSession) {
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
     showToast("Call could not connect", "warning");
+    renderCallControls(callSession);
     return;
   }
 
@@ -438,13 +502,14 @@ async function startBackendRelayFallback(callSession) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
+    renderCallControls(callSession);
     return;
   }
 
   callSession.call_state = "connecting_backend_relay";
   callSession.backend_relay_started_at = Date.now();
-  callSession.media_mode = currentLocalMediaMode();
-  setCallStatus(callSession.media_mode === "audio_video" ? "Connecting video call..." : "Connecting audio call...", "warn");
+  callSession.media_mode = "audio_only";
+  setCallStatus("Connecting audio call...", "warn");
 
   if (callSession.call_kind === "direct") {
     closePeer(callSession.peerId);
@@ -458,15 +523,11 @@ async function startBackendRelayFallback(callSession) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
     setCallStatus("Could not connect", "bad");
+    renderCallControls(callSession);
+    return;
   }
-}
 
-function currentLocalMediaMode() {
-  const videoTracks = state.localStream ?
-    state.localStream.getVideoTracks().filter((track) => track.readyState === "live" && track.enabled !== false) :
-    [];
-
-  return videoTracks.length > 0 ? "audio_video" : "audio_only";
+  renderCallControls(callSession);
 }
 
 export function selectCallTransport(callSession, transport) {
@@ -481,12 +542,14 @@ export function selectCallTransport(callSession, transport) {
     callSession.call_state = "connected_p2p";
     callSession.p2p_connected_at = Date.now();
     setCallStatus("Connected", "good");
+    renderCallControls(callSession);
     return;
   }
 
   callSession.call_state = "connected_relay";
   callSession.relay_connected_at = Date.now();
   setCallStatus("Connected", "good");
+  renderCallControls(callSession);
 }
 
 export function endCallSession(callSession = state.calls.active, options = {}) {
@@ -510,6 +573,7 @@ export function endCallSession(callSession = state.calls.active, options = {}) {
   hideIncomingCall();
   setCallStatus("idle");
   addSystemMessage("call ended");
+  renderCallControls(null);
 }
 
 export function toggleMicrophone() {
@@ -554,6 +618,7 @@ export function toggleCamera() {
   }
 
   setCallStatus(nextEnabled ? "Connected" : "Camera off", nextEnabled ? "good" : "warn");
+  renderCallControls();
 }
 
 export async function minimizeCall() {
@@ -610,6 +675,7 @@ export async function handleCallEvent(parts) {
           session.call_state = "failed";
           session.ended_at = Date.now();
           setCallStatus("Could not connect", "bad");
+          renderCallControls(session);
         });
         return;
       }
@@ -623,6 +689,7 @@ export async function handleCallEvent(parts) {
           session.call_state = "failed";
           session.ended_at = Date.now();
           setCallStatus("Could not connect", "bad");
+          renderCallControls(session);
         });
       }
     }
@@ -633,6 +700,7 @@ export async function handleCallEvent(parts) {
     if (session) {
       session.call_state = "ended";
       session.ended_at = Date.now();
+      renderCallControls(session);
     }
     hideIncomingCall();
     setCallStatus("Call declined", "warn");
@@ -666,6 +734,7 @@ async function handleIncomingInvite(payload, fromUsername, serverNow, directPeer
   });
   session.server_now = serverNow;
   session.call_state = "ringing";
+  renderCallControls(session);
   addSystemMessage(`incoming call from ${callerUsername}`);
   showToast(`Incoming call from ${callerUsername}`, "info");
   setCallStatus("Incoming call", "warn");
@@ -689,6 +758,7 @@ async function acceptIncomingCall(callSession) {
   if (!media.ok) {
     callSession.call_state = "failed";
     callSession.ended_at = Date.now();
+    renderCallControls(callSession);
     return;
   }
 
@@ -696,6 +766,7 @@ async function acceptIncomingCall(callSession) {
   callSession.media_mode = media.mediaMode;
   callSession.call_state = "connecting_p2p";
   callSession.accepted_at = Date.now();
+  renderCallControls(callSession);
 
   if (callSession.call_kind === "direct" && (!callSession.peerId || !callSession.peerPublicWire)) {
     const peer = await requestDirectPeer(callSession.caller_username, { fresh: true, userVisible: true }).catch(() => null);
@@ -704,6 +775,7 @@ async function acceptIncomingCall(callSession) {
       callSession.ended_at = Date.now();
       setCallStatus("Caller unavailable", "bad");
       showToast("Caller is not online yet", "warning");
+      renderCallControls(callSession);
       return;
     }
     callSession.peerId = peer.peerId;
@@ -743,6 +815,7 @@ async function declineIncomingCall(callSession) {
     state.calls.active = null;
   }
   setCallStatus("Call declined", "warn");
+  renderCallControls(null);
 }
 
 function handleP2PState(peerId, value, transport = null) {
@@ -779,6 +852,7 @@ function handleP2PState(peerId, value, transport = null) {
           callSession.call_state = "failed";
           callSession.ended_at = Date.now();
           setCallStatus("Could not connect", "bad");
+          renderCallControls(callSession);
         });
       }
     }, 1000);
@@ -790,6 +864,7 @@ function handleP2PState(peerId, value, transport = null) {
       callSession.call_state = "failed";
       callSession.ended_at = Date.now();
       setCallStatus("Could not connect", "bad");
+      renderCallControls(callSession);
     });
   }
 }

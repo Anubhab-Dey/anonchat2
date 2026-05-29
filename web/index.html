@@ -153,6 +153,11 @@
             <button id="cameraToggleBtn" type="button" aria-pressed="false">Camera off</button>
             <button id="pipCallBtn" type="button">Mini call</button>
           </div>
+          <div id="incomingCallControls" class="call-actions" hidden>
+            <button id="declineCallPanelBtn" type="button">Decline</button>
+            <button id="acceptCallPanelBtn" class="primary-button" type="button">Accept</button>
+          </div>
+          <button id="hangupCallBtn" class="danger-button" type="button" disabled>End call</button>
           <video id="localVideo" autoplay muted playsinline></video>
           <div id="remoteVideos" class="remote-videos"></div>
         </section>
@@ -191,6 +196,7 @@
     </section>
 
     <script src="/config.js"></script>
+    <script src="/local-config.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
