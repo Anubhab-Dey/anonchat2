@@ -6,8 +6,8 @@ window.ANONCHAT_CONFIG = {
   iceServers: [
     {
       urls: [
-        "turns:turn.example.com:5349?transport=tcp",
-        "turn:turn.example.com:3478?transport=udp"
+        "turns:turn.anubhabdey.com:5349?transport=tcp",
+        "turn:turn.anubhabdey.com:3478?transport=udp"
       ],
       username: "replace-with-short-lived-username",
       credential: "replace-with-short-lived-credential"

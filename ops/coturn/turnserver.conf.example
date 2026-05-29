@@ -1,24 +1,25 @@
 # Example coturn config for AnonChat WebRTC calls.
-# Replace all example values before deployment.
+# Replace YOUR_PUBLIC_VPS_IP and the static auth secret before deployment.
 
 listening-port=3478
 tls-listening-port=5349
 
 # If coturn is behind NAT, set the public/private pair instead:
-# external-ip=203.0.113.10/10.0.0.10
-external-ip=203.0.113.10
+# external-ip=YOUR_PUBLIC_VPS_IP/YOUR_PRIVATE_VPS_IP
+external-ip=YOUR_PUBLIC_VPS_IP
 
-realm=turn.example.com
-server-name=turn.example.com
+realm=turn.anubhabdey.com
+server-name=turn.anubhabdey.com
 fingerprint
 
 # TURN REST credentials: username is an expiry timestamp, credential is
 # base64(HMAC-SHA1(username, static-auth-secret)).
+lt-cred-mech
 use-auth-secret
 static-auth-secret=replace-with-a-long-random-secret
 
-cert=/etc/letsencrypt/live/turn.example.com/fullchain.pem
-pkey=/etc/letsencrypt/live/turn.example.com/privkey.pem
+cert=/etc/turnserver/certs/turn.anubhabdey.com/fullchain.pem
+pkey=/etc/turnserver/certs/turn.anubhabdey.com/privkey.pem
 
 min-port=49160
 max-port=49200
