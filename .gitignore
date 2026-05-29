@@ -1,5 +1,11 @@
 build/
 .build-linux/
+backend/server
+backend/server.exe
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.vite/
 *.exe
 *.o
 *.obj
