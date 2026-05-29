@@ -119,13 +119,21 @@ export async function startDirectCall(username = "") {
     return;
   }
 
+  setCallStatus("Finding user...", "warn");
+  const peer = await requestDirectPeer(clean, { fresh: true, userVisible: true }).catch(() => null);
+
+  if (!peer || !peer.peerId || !peer.publicWire) {
+    setCallStatus("User unavailable", "bad");
+    showToast(`${clean} is not online yet`, "warning");
+    return;
+  }
+
   const media = await prepareCallMedia();
 
   if (!media.ok) {
     return;
   }
 
-  const peer = await requestDirectPeer(clean, { fresh: true });
   const conversation = await upsertConversation({
     id: directConversationId(peer.username),
     kind: "dm",
@@ -665,7 +673,14 @@ async function acceptIncomingCall(callSession) {
   callSession.accepted_at = Date.now();
 
   if (callSession.call_kind === "direct" && (!callSession.peerId || !callSession.peerPublicWire)) {
-    const peer = await requestDirectPeer(callSession.caller_username, { fresh: true });
+    const peer = await requestDirectPeer(callSession.caller_username, { fresh: true, userVisible: true }).catch(() => null);
+    if (!peer || !peer.peerId || !peer.publicWire) {
+      callSession.call_state = "failed";
+      callSession.ended_at = Date.now();
+      setCallStatus("Caller unavailable", "bad");
+      showToast("Caller is not online yet", "warning");
+      return;
+    }
     callSession.peerId = peer.peerId;
     callSession.peerPublicWire = peer.publicWire;
     callSession.target = peer.username;

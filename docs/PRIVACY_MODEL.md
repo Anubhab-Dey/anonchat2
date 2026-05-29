@@ -104,7 +104,7 @@ This is not remote push delivery while the app is fully closed. True Web Push wo
 
 ## Calls And Files
 
-Audio and video use WebRTC media, which browsers protect with DTLS-SRTP. The preferred path is direct P2P. When trusted/self-hosted TURN is configured, ICE can fall back to relayed candidates automatically; the TURN server relays encrypted WebRTC packets and does not decrypt media. The C app server does not receive raw media packets and does not implement custom audio/video frame relaying.
+Audio and video prefer WebRTC media, which browsers protect with DTLS-SRTP. The preferred path is direct P2P. When trusted/self-hosted TURN is configured, ICE can fall back to relayed candidates automatically; the TURN server relays encrypted WebRTC packets and does not decrypt media. If WebRTC cannot connect, the C app server can relay opaque `CALL_RELAY` media chunks that are encrypted in the browser before sending. The app server still sees usernames, call ids, payload sizes, and timing, but not decrypted media.
 
 Files are transferred over WebRTC data channels. File metadata and chunks are additionally encrypted in the browser with the room file key, then checked with SHA-256 after download. The sender's browser keeps the file only long enough to transfer it; the server never stores file bytes.
 

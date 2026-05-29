@@ -7,7 +7,7 @@ import { showToast } from "./toast.js";
 import { setCallStatus } from "./ui.js";
 
 const MEDIA_CHUNK_MS = 250;
-const MAX_MEDIA_CHUNK_BYTES = 128 * 1024;
+const MAX_MEDIA_CHUNK_BYTES = 80 * 1024;
 const MAX_PLAYBACK_QUEUE = 64;
 const MAX_BUFFER_SECONDS = 45;
 const AUDIO_BITRATE = 32000;

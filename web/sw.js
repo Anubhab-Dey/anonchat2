@@ -1,4 +1,4 @@
-const CACHE_NAME = "anonchat-static-v7";
+const CACHE_NAME = "anonchat-static-v8";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
@@ -22,6 +22,7 @@ const STATIC_ASSETS = [
   "/modules/calls.js",
   "/modules/call-p2p.js",
   "/modules/call-relay.js",
+  "/modules/call-backend-relay.js",
   "/modules/files.js",
   "/modules/notifications.js",
   "/modules/ui.js"

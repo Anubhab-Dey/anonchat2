@@ -6,6 +6,6 @@ window.ANONCHAT_CONFIG = {
   relayFallbackEnabled: true,
   backendRelayFallbackEnabled: true,
   turnRequiredForFallback: true,
-  callTransport: "backend_relay",
+  callTransport: "p2p_first",
   iceCandidatePoolSize: 2
 };
