@@ -79,6 +79,7 @@ The default browser config uses no third-party ICE servers:
 ```js
 window.ANONCHAT_CONFIG = {
   iceServers: [],
+  turnCredentialUrl: "/turn-credentials.json",
   relayFallbackEnabled: true,
   backendRelayFallbackEnabled: true,
   callTransport: "p2p_first",
@@ -88,7 +89,7 @@ window.ANONCHAT_CONFIG = {
 
 That is more private, but direct peer-to-peer WebRTC may only work on the same machine or LAN. The call order is direct WebRTC first, then relay-only WebRTC through a configured first-party TURN server, then the app server's opaque audio-only `CALL_RELAY` fallback. TURN relays encrypted DTLS-SRTP packets and does not decrypt call media. The app server fallback relays browser-encrypted audio chunks and also does not decrypt call audio.
 
-For reliable internet video calls, deploy a first-party TURN server such as coturn and serve its `turn:` or `turns:` URLs through `web/local-config.js`. Start from [web/local-config.example.js](web/local-config.example.js) and [ops/coturn/README.md](ops/coturn/README.md). Without TURN, calls can still fall back to the encrypted app-server audio relay after both sides accept the call, but that path is audio-only by design. Video stays on WebRTC P2P or WebRTC TURN so the browser keeps the media protected with DTLS-SRTP end to end.
+For reliable internet video calls, deploy a first-party TURN server such as coturn and set `ANONCHAT_TURN_SECRET` on the app server. The browser fetches short-lived TURN credentials from `/turn-credentials.json`; start from [web/local-config.example.js](web/local-config.example.js) and [ops/coturn/README.md](ops/coturn/README.md). Without TURN, calls can still fall back to the encrypted app-server audio relay after both sides accept the call, but that path is audio-only by design. Video stays on WebRTC P2P or WebRTC TURN so the browser keeps the media protected with DTLS-SRTP end to end.
 
 ## Important Limits
 

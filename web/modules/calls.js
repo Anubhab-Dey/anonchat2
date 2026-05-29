@@ -5,6 +5,7 @@ import {
   callsUseBackendRelayOnly,
   cleanUsername,
   hasTurnRelayConfigured,
+  loadTurnCredentials,
   relayFallbackEnabled,
 } from "./state.js";
 import { els } from "./dom.js";
@@ -297,6 +298,7 @@ export async function startP2PAttempt(callSession, roomPeerIds = null, options =
   }
 
   callSession.media_mode = media.mediaMode;
+  await loadTurnCredentials();
 
   callSession.call_state = "connecting_p2p";
   callSession.p2p_started_at = Date.now();
@@ -399,6 +401,8 @@ export async function startRelayFallback(callSession) {
     renderCallControls(callSession);
     return;
   }
+
+  await loadTurnCredentials();
 
   if (!hasTurnRelayConfigured()) {
     await startBackendRelayFallback(callSession);

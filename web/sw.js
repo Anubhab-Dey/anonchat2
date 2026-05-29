@@ -1,4 +1,4 @@
-const CACHE_NAME = "anonchat-static-v12";
+const CACHE_NAME = "anonchat-static-v13";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
@@ -57,6 +57,23 @@ self.addEventListener("fetch", (event) => {
             : new Response("", { headers: { "content-type": "application/javascript" } })
         )
         .catch(() => new Response("", { headers: { "content-type": "application/javascript" } }))
+    );
+    return;
+  }
+
+  if (url.pathname === "/turn-credentials.json") {
+    event.respondWith(
+      fetch(event.request, { cache: "no-store" })
+        .then((response) =>
+          response.ok
+            ? response
+            : new Response("{\"iceServers\":[],\"ttlSeconds\":0,\"configured\":false}\n", {
+                headers: { "content-type": "application/json" }
+              })
+        )
+        .catch(() => new Response("{\"iceServers\":[],\"ttlSeconds\":0,\"configured\":false}\n", {
+          headers: { "content-type": "application/json" }
+        }))
     );
     return;
   }

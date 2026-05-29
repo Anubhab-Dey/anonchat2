@@ -1,13 +1,14 @@
 # AnonChat TURN Deployment
 
-Video calls must stay on WebRTC. The server fallback is intentionally audio-only because custom app-server video chunks would need a real SFU/WebRTC relay layer to be correct. For private video calls over the internet, run coturn at `turn.anubhabdey.com` and serve those TURN URLs through `web/local-config.js`.
+Video calls must stay on WebRTC. The server fallback is intentionally audio-only because custom app-server video chunks would need a real SFU/WebRTC relay layer to be correct. For private video calls over the internet, run coturn at `turn.anubhabdey.com` and let the AnonChat app server generate short-lived TURN credentials from `ANONCHAT_TURN_SECRET`.
 
 ## Network
 
-Create an `A` record first:
+Create DNS records first:
 
 ```text
-turn.anubhabdey.com -> YOUR_PUBLIC_VPS_IP
+turn.anubhabdey.com A    187.127.131.227
+turn.anubhabdey.com AAAA 2a02:4780:63:6b7d::1
 ```
 
 Open these ports to the coturn host:
@@ -100,7 +101,6 @@ echo 'TURNSERVER_ENABLED=1' | sudo tee -a /etc/default/coturn
 
 Copy `ops/coturn/turnserver.conf.example` to your server's coturn config path and replace:
 
-- `YOUR_PUBLIC_VPS_IP`
 - `static-auth-secret`
 - relay port range, if you expect more concurrent calls
 
@@ -125,42 +125,54 @@ sudo ufw allow 49160:49200/udp
 
 Also open those ports in your VPS provider firewall/security group.
 
-## Browser Config
+## AnonChat App Server
 
-Copy `web/local-config.example.js` to `web/local-config.js` on the deployed AnonChat server and put the TURN URLs and short-lived credentials there. The file is ignored by git and is loaded after `web/config.js`.
+Set the same shared secret on the AnonChat app server. The browser will fetch short-lived credentials from `/turn-credentials.json`, so you do not manually edit TURN usernames/passwords into `web/local-config.js`.
 
-Example credential generation for coturn REST credentials:
+For a manual foreground run on Ubuntu:
+
+```bash
+export ANONCHAT_TURN_SECRET='replace-with-the-same-static-auth-secret'
+export ANONCHAT_TURN_HOST='turn.anubhabdey.com'
+export ANONCHAT_TURN_TTL_SECONDS=3600
+./build-linux/anonchat
+```
+
+For a systemd service, add an override:
+
+```bash
+sudo systemctl edit anonchat
+```
+
+Then add:
+
+```ini
+[Service]
+Environment=ANONCHAT_TURN_SECRET=replace-with-the-same-static-auth-secret
+Environment=ANONCHAT_TURN_HOST=turn.anubhabdey.com
+Environment=ANONCHAT_TURN_TTL_SECONDS=3600
+```
+
+Restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart anonchat
+```
+
+On Windows PowerShell for local development:
 
 ```powershell
-$secret = "replace-with-your-static-auth-secret"
-$expiry = [DateTimeOffset]::UtcNow.AddHours(1).ToUnixTimeSeconds()
-$username = "$expiry:anonchat"
-$hmac = [System.Security.Cryptography.HMACSHA1]::new([Text.Encoding]::UTF8.GetBytes($secret))
-$credential = [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($username)))
-$username
-$credential
+$env:ANONCHAT_TURN_SECRET = "replace-with-the-same-static-auth-secret"
+$env:ANONCHAT_TURN_HOST = "turn.anubhabdey.com"
+$env:ANONCHAT_TURN_TTL_SECONDS = "3600"
+.\build\anonchat.exe
 ```
 
-Put the generated values into `web/local-config.js`:
+Verify:
 
-```js
-window.ANONCHAT_CONFIG = {
-  ...(window.ANONCHAT_CONFIG || {}),
-  iceServers: [
-    {
-      urls: [
-        "turns:turn.anubhabdey.com:5349?transport=tcp",
-        "turn:turn.anubhabdey.com:3478?transport=udp"
-      ],
-      username: "generated-expiry:anonchat",
-      credential: "generated-hmac"
-    }
-  ],
-  callTransport: "p2p_first",
-  relayFallbackEnabled: true,
-  backendRelayFallbackEnabled: true,
-  turnRequiredForFallback: true
-};
+```bash
+curl http://127.0.0.1:8080/turn-credentials.json
 ```
 
-For production, generate these credentials server-side and refresh them often. Static TURN credentials are acceptable for a private prototype, but they can be copied by any browser that loads the app.
+The response should contain `turns:turn.anubhabdey.com:5349`, a generated `username`, and a generated `credential`. Do not log or paste the shared secret.

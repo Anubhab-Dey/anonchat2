@@ -1,13 +1,86 @@
 export const appConfig = window.ANONCHAT_CONFIG || {
   iceServers: [],
+  turnCredentialUrl: "/turn-credentials.json",
   relayFallbackEnabled: true,
   backendRelayFallbackEnabled: true,
   turnRequiredForFallback: true,
   callTransport: "p2p_first",
 };
 
+if (typeof appConfig.turnCredentialUrl === "undefined") {
+  appConfig.turnCredentialUrl = "/turn-credentials.json";
+}
+
+let turnCredentialRefreshTimer = null;
+let turnCredentialLoadPromise = null;
+let turnCredentialsExpiresAt = 0;
+
 export function getIceServers() {
   return Array.isArray(appConfig.iceServers) ? appConfig.iceServers : [];
+}
+
+export async function loadTurnCredentials(options = {}) {
+  const force = options.force === true;
+  const credentialUrl = appConfig.turnCredentialUrl;
+
+  if (credentialUrl === false || credentialUrl === null) {
+    return false;
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  if (!force && turnCredentialsExpiresAt && nowSeconds < turnCredentialsExpiresAt - 300) {
+    return true;
+  }
+
+  if (turnCredentialLoadPromise) {
+    return turnCredentialLoadPromise;
+  }
+
+  const url = typeof credentialUrl === "string" && credentialUrl ?
+    credentialUrl :
+    "/turn-credentials.json";
+
+  turnCredentialLoadPromise = fetch(url, {
+    cache: "no-store",
+    credentials: "same-origin",
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        return false;
+      }
+
+      const payload = await response.json();
+
+      if (!payload || !Array.isArray(payload.iceServers) || payload.iceServers.length === 0) {
+        return false;
+      }
+
+      appConfig.iceServers = payload.iceServers;
+      const ttlSeconds = Number(payload.ttlSeconds) || 0;
+      turnCredentialsExpiresAt = Number(payload.expiresAt) || (ttlSeconds ? nowSeconds + ttlSeconds : 0);
+      scheduleTurnCredentialRefresh(ttlSeconds);
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => {
+      turnCredentialLoadPromise = null;
+    });
+
+  return turnCredentialLoadPromise;
+}
+
+function scheduleTurnCredentialRefresh(ttlSeconds) {
+  clearTimeout(turnCredentialRefreshTimer);
+
+  if (!ttlSeconds || ttlSeconds <= 0) {
+    return;
+  }
+
+  const refreshInMs = Math.max(60000, (ttlSeconds - 300) * 1000);
+  turnCredentialRefreshTimer = setTimeout(() => {
+    loadTurnCredentials({ force: true }).catch(() => {});
+  }, refreshInMs);
 }
 
 export function hasTurnRelayConfigured() {

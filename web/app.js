@@ -1,4 +1,4 @@
-import { state, activeConversation, accountKeyForUsername, accountSettingKey, clearSessionOnly } from "./modules/state.js";
+import { state, activeConversation, accountKeyForUsername, accountSettingKey, clearSessionOnly, loadTurnCredentials } from "./modules/state.js";
 import { els } from "./modules/dom.js";
 import { openLocalDb, dbGet } from "./modules/local-db.js";
 import { connect, flushWireQueue, onWire, setStatus } from "./modules/wire.js";
@@ -391,6 +391,7 @@ async function boot() {
   await openLocalDb();
   initializeSessionCoordination();
   await restoreLocalSessionSummary();
+  await loadTurnCredentials();
   loadInitialRoomInputs();
   bindEvents();
   bindProtocol();

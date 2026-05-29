@@ -108,7 +108,7 @@ Audio and video prefer WebRTC media, which browsers protect with DTLS-SRTP. The 
 
 Files are transferred over WebRTC data channels. File metadata and chunks are additionally encrypted in the browser with the room file key, then checked with SHA-256 after download. The sender's browser keeps the file only long enough to transfer it; the server never stores file bytes.
 
-By default, the browser is configured with no public STUN/TURN servers in `web/config.js`. That is more private, but peer-to-peer connections may fail across NATs. For worldwide deployment, configure first-party STUN/TURN in ignored deployment config such as `web/local-config.js`; start from `web/local-config.example.js` and `ops/coturn/README.md`. TURN improves connectivity but exposes metadata such as participant IPs, timing, and packet sizes to the TURN operator. TURN credentials are visible to browsers, so production deployments should use short-lived credentials generated from server-side secret material.
+By default, the browser is configured with no public STUN/TURN servers in `web/config.js`. That is more private, but peer-to-peer connections may fail across NATs. For worldwide deployment, configure first-party STUN/TURN by setting `ANONCHAT_TURN_SECRET` on the app server; browsers fetch short-lived credentials from `/turn-credentials.json`. TURN improves connectivity but exposes metadata such as participant IPs, timing, and packet sizes to the TURN operator. TURN credentials are visible to browsers, so the server generates credentials with a short expiry from server-side secret material.
 
 ## Deployment Rules
 
@@ -124,6 +124,6 @@ By default, the browser is configured with no public STUN/TURN servers in `web/c
 - Persistent accounts with encrypted-at-rest recovery email, still no message storage.
 - OPAQUE or another PAKE instead of sending password material over TLS.
 - Optional Tor onion service deployment profile.
-- Automated short-lived TURN credential endpoint.
+- Authenticated or rate-limited short-lived TURN credential endpoint if abuse becomes a problem.
 - Reproducible builds.
 - Memory locking for password material where supported.

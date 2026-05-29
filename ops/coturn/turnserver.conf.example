@@ -1,12 +1,14 @@
 # Example coturn config for AnonChat WebRTC calls.
-# Replace YOUR_PUBLIC_VPS_IP and the static auth secret before deployment.
+# Replace only the static auth secret before deployment.
 
 listening-port=3478
 tls-listening-port=5349
 
-# If coturn is behind NAT, set the public/private pair instead:
-# external-ip=YOUR_PUBLIC_VPS_IP/YOUR_PRIVATE_VPS_IP
-external-ip=YOUR_PUBLIC_VPS_IP
+listening-ip=0.0.0.0
+listening-ip=::
+
+external-ip=187.127.131.227
+external-ip=2a02:4780:63:6b7d::1
 
 realm=turn.anubhabdey.com
 server-name=turn.anubhabdey.com

@@ -11,6 +11,7 @@
 #include <sys/random.h>
 #endif
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/bn.h>
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
@@ -38,6 +39,7 @@
 
 #define DEFAULT_LISTEN_PORT 8080
 #define WS_PATH "/ws"
+#define TURN_CREDENTIALS_PATH "/turn-credentials.json"
 
 #define MAX_CLIENTS 128
 #define USERNAME_MAX 32
@@ -51,6 +53,16 @@
 #define OUTBOX_SIZE 16
 #define CALL_SLOTS 128
 #define SESSION_NONCE_TTL_SECONDS 300
+#define TURN_HOST_DEFAULT "turn.anubhabdey.com"
+#define TURN_HOST_MAX 253
+#define TURN_SECRET_MAX 256
+#define TURN_USERNAME_MAX 96
+#define TURN_CREDENTIAL_BYTES 20
+#define TURN_CREDENTIAL_TEXT_MAX 64
+#define TURN_RESPONSE_MAX 768
+#define TURN_TTL_DEFAULT_SECONDS 3600
+#define TURN_TTL_MIN_SECONDS 300
+#define TURN_TTL_MAX_SECONDS 86400
 
 #define PEER_ID_BYTES 8
 #define PEER_ID_TEXT_BYTES ((PEER_ID_BYTES * 2) + 1)
@@ -162,6 +174,59 @@ static const char *database_path_from_env(void) {
     }
 
     return "anonchat.sqlite3";
+}
+
+static int valid_turn_host(const char *host) {
+    size_t len = bounded_strlen(host, TURN_HOST_MAX + 1);
+
+    if (len == 0 || len > TURN_HOST_MAX) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        char c = host[i];
+        int ok =
+            (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') ||
+            c == '.' ||
+            c == '-';
+
+        if (!ok) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static const char *turn_host_from_env(void) {
+    const char *host = getenv("ANONCHAT_TURN_HOST");
+
+    if (host != NULL && host[0] != '\0') {
+        return valid_turn_host(host) ? host : NULL;
+    }
+
+    return TURN_HOST_DEFAULT;
+}
+
+static int64_t turn_ttl_from_env(void) {
+    const char *text = getenv("ANONCHAT_TURN_TTL_SECONDS");
+    int64_t ttl = TURN_TTL_DEFAULT_SECONDS;
+
+    if (text != NULL && text[0] != '\0') {
+        (void)parse_i64(text, &ttl);
+    }
+
+    if (ttl < TURN_TTL_MIN_SECONDS) {
+        return TURN_TTL_MIN_SECONDS;
+    }
+
+    if (ttl > TURN_TTL_MAX_SECONDS) {
+        return TURN_TTL_MAX_SECONDS;
+    }
+
+    return ttl;
 }
 
 static int db_exec(const char *sql) {
@@ -578,6 +643,205 @@ static int base64url_decode(
 
     *out_len = written;
     return 1;
+}
+
+static int base64_encode(
+    const unsigned char *input,
+    size_t input_len,
+    char *out,
+    size_t out_size
+) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    if (input == NULL || out == NULL) {
+        return 0;
+    }
+
+    size_t needed = ((input_len + 2) / 3) * 4;
+
+    if (needed + 1 > out_size) {
+        return 0;
+    }
+
+    size_t written = 0;
+
+    for (size_t i = 0; i < input_len; i += 3) {
+        unsigned int chunk = (unsigned int)input[i] << 16;
+        size_t remaining = input_len - i;
+
+        if (remaining > 1) {
+            chunk |= (unsigned int)input[i + 1] << 8;
+        }
+
+        if (remaining > 2) {
+            chunk |= (unsigned int)input[i + 2];
+        }
+
+        out[written++] = alphabet[(chunk >> 18) & 0x3f];
+        out[written++] = alphabet[(chunk >> 12) & 0x3f];
+        out[written++] = remaining > 1 ? alphabet[(chunk >> 6) & 0x3f] : '=';
+        out[written++] = remaining > 2 ? alphabet[chunk & 0x3f] : '=';
+    }
+
+    out[written] = '\0';
+    return 1;
+}
+
+static int hmac_sha1_text(
+    const char *secret,
+    size_t secret_len,
+    const char *text,
+    size_t text_len,
+    unsigned char out_mac[TURN_CREDENTIAL_BYTES]
+) {
+    if (secret == NULL || text == NULL || out_mac == NULL ||
+        secret_len == 0 || secret_len > TURN_SECRET_MAX) {
+        return 0;
+    }
+
+    memset(out_mac, 0, TURN_CREDENTIAL_BYTES);
+
+#ifdef _WIN32
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(
+        &algorithm,
+        BCRYPT_SHA1_ALGORITHM,
+        NULL,
+        BCRYPT_ALG_HANDLE_HMAC_FLAG
+    );
+
+    if (status != 0) {
+        return 0;
+    }
+
+    status = BCryptCreateHash(
+        algorithm,
+        &hash,
+        NULL,
+        0,
+        (PUCHAR)(const unsigned char *)secret,
+        (ULONG)secret_len,
+        0
+    );
+
+    if (status == 0) {
+        status = BCryptHashData(hash, (PUCHAR)(const unsigned char *)text, (ULONG)text_len, 0);
+    }
+
+    if (status == 0) {
+        status = BCryptFinishHash(hash, out_mac, TURN_CREDENTIAL_BYTES, 0);
+    }
+
+    if (hash != NULL) {
+        BCryptDestroyHash(hash);
+    }
+
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+
+    if (status != 0) {
+        memset(out_mac, 0, TURN_CREDENTIAL_BYTES);
+        return 0;
+    }
+
+    return 1;
+#else
+    unsigned int out_len = 0;
+
+    if (HMAC(
+            EVP_sha1(),
+            secret,
+            (int)secret_len,
+            (const unsigned char *)text,
+            text_len,
+            out_mac,
+            &out_len
+        ) == NULL ||
+        out_len != TURN_CREDENTIAL_BYTES) {
+        memset(out_mac, 0, TURN_CREDENTIAL_BYTES);
+        return 0;
+    }
+
+    return 1;
+#endif
+}
+
+static int build_turn_credentials_json(char out[TURN_RESPONSE_MAX]) {
+    const char *secret = getenv("ANONCHAT_TURN_SECRET");
+    const char *host = turn_host_from_env();
+
+    if (out == NULL) {
+        return 0;
+    }
+
+    if (secret == NULL || secret[0] == '\0' || host == NULL) {
+        int written = snprintf(
+            out,
+            TURN_RESPONSE_MAX,
+            "{\"iceServers\":[],\"ttlSeconds\":0,\"configured\":false}\n"
+        );
+        return written > 0 && written < TURN_RESPONSE_MAX;
+    }
+
+    size_t secret_len = bounded_strlen(secret, TURN_SECRET_MAX + 1);
+
+    if (secret_len == 0 || secret_len > TURN_SECRET_MAX) {
+        int written = snprintf(
+            out,
+            TURN_RESPONSE_MAX,
+            "{\"iceServers\":[],\"ttlSeconds\":0,\"configured\":false}\n"
+        );
+        return written > 0 && written < TURN_RESPONSE_MAX;
+    }
+
+    int64_t ttl = turn_ttl_from_env();
+    int64_t expires_at = now_unix() + ttl;
+    char username[TURN_USERNAME_MAX];
+    unsigned char mac[TURN_CREDENTIAL_BYTES];
+    char credential[TURN_CREDENTIAL_TEXT_MAX];
+
+    int username_len = snprintf(
+        username,
+        sizeof(username),
+        "%lld:anonchat",
+        (long long)expires_at
+    );
+
+    if (username_len <= 0 ||
+        username_len >= (int)sizeof(username) ||
+        !hmac_sha1_text(
+            secret,
+            secret_len,
+            username,
+            (size_t)username_len,
+            mac
+        ) ||
+        !base64_encode(mac, sizeof(mac), credential, sizeof(credential))) {
+        secure_clear(mac, sizeof(mac));
+        secure_clear(credential, sizeof(credential));
+        return 0;
+    }
+
+    int written = snprintf(
+        out,
+        TURN_RESPONSE_MAX,
+        "{\"iceServers\":[{\"urls\":[\"turns:%s:5349?transport=tcp\","
+        "\"turn:%s:3478?transport=udp\"],\"username\":\"%s\","
+        "\"credential\":\"%s\"}],\"ttlSeconds\":%lld,\"expiresAt\":%lld,"
+        "\"configured\":true}\n",
+        host,
+        host,
+        username,
+        credential,
+        (long long)ttl,
+        (long long)expires_at
+    );
+
+    secure_clear(mac, sizeof(mac));
+    secure_clear(credential, sizeof(credential));
+
+    return written > 0 && written < TURN_RESPONSE_MAX;
 }
 
 static int json_string_field(
@@ -3305,6 +3569,100 @@ static int is_allowed_path(struct lws *wsi) {
     return strcmp(path, WS_PATH) == 0;
 }
 
+static int send_http_json(
+    struct lws *wsi,
+    const char *body,
+    enum http_status status
+) {
+    if (body == NULL) {
+        return -1;
+    }
+
+    size_t body_len = bounded_strlen(body, TURN_RESPONSE_MAX);
+    unsigned char header[LWS_PRE + 512];
+    unsigned char payload[LWS_PRE + TURN_RESPONSE_MAX];
+    unsigned char *p = &header[LWS_PRE];
+    unsigned char *end = &header[sizeof(header)];
+
+    if (lws_add_http_header_status(wsi, status, &p, end) ||
+        lws_add_http_header_by_token(
+            wsi,
+            WSI_TOKEN_HTTP_CONTENT_TYPE,
+            (const unsigned char *)"application/json",
+            16,
+            &p,
+            end
+        ) ||
+        lws_add_http_header_by_name(
+            wsi,
+            (const unsigned char *)"cache-control:",
+            (const unsigned char *)"no-store",
+            8,
+            &p,
+            end
+        ) ||
+        lws_add_http_header_content_length(wsi, (lws_filepos_t)body_len, &p, end) ||
+        lws_finalize_write_http_header(wsi, &header[LWS_PRE], &p, end)) {
+        secure_clear(header, sizeof(header));
+        return -1;
+    }
+
+    if (body_len > 0) {
+        memcpy(&payload[LWS_PRE], body, body_len);
+
+        int written = lws_write_http(wsi, &payload[LWS_PRE], body_len);
+
+        secure_clear(payload, sizeof(payload));
+
+        if (written < 0 || (size_t)written != body_len) {
+            secure_clear(header, sizeof(header));
+            return -1;
+        }
+    }
+
+    secure_clear(header, sizeof(header));
+    return lws_http_transaction_completed(wsi);
+}
+
+static int serve_turn_credentials(struct lws *wsi) {
+    char body[TURN_RESPONSE_MAX];
+
+    if (!build_turn_credentials_json(body)) {
+        return send_http_json(
+            wsi,
+            "{\"iceServers\":[],\"ttlSeconds\":0,\"configured\":false}\n",
+            HTTP_STATUS_INTERNAL_SERVER_ERROR
+        );
+    }
+
+    int result = send_http_json(wsi, body, HTTP_STATUS_OK);
+    secure_clear(body, sizeof(body));
+    return result;
+}
+
+static int http_callback(
+    struct lws *wsi,
+    enum lws_callback_reasons reason,
+    void *user,
+    void *in,
+    size_t len
+) {
+    (void)user;
+    (void)in;
+    (void)len;
+
+    if (reason == LWS_CALLBACK_HTTP) {
+        char path[128];
+        int copied = lws_hdr_copy(wsi, path, sizeof(path), WSI_TOKEN_GET_URI);
+
+        if (copied > 0 && strcmp(path, TURN_CREDENTIALS_PATH) == 0) {
+            return serve_turn_credentials(wsi);
+        }
+    }
+
+    return lws_callback_http_dummy(wsi, reason, user, in, len);
+}
+
 static int anonchat_callback(
     struct lws *wsi,
     enum lws_callback_reasons reason,
@@ -3426,7 +3784,7 @@ static int anonchat_callback(
 static const struct lws_protocols protocols[] = {
     {
         .name = "http",
-        .callback = lws_callback_http_dummy,
+        .callback = http_callback,
         .per_session_data_size = 0,
         .rx_buffer_size = 0,
         .id = 0,
