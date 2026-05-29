@@ -8,6 +8,7 @@ import { setCallStatus } from "./ui.js";
 
 const MEDIA_CHUNK_MS = 250;
 const MAX_MEDIA_CHUNK_BYTES = 80 * 1024;
+const MAX_CALL_RELAY_WIRE_BYTES = 240 * 1024;
 const MAX_PLAYBACK_QUEUE = 64;
 const MAX_BUFFER_SECONDS = 45;
 const AUDIO_BITRATE = 32000;
@@ -289,7 +290,14 @@ async function sendMediaChunk(relay, blob) {
     bytes: bytesToBase64Url(bytes),
   });
 
-  sendWire(`CALL_RELAY|${relay.callId}|${sequence}|${payload}`);
+  const frame = `CALL_RELAY|${relay.callId}|${sequence}|${payload}`;
+
+  if (frame.length > MAX_CALL_RELAY_WIRE_BYTES) {
+    warnConnectionUnstable(relay);
+    return;
+  }
+
+  sendWire(frame);
 }
 
 function markBackendRelayConnected(callSession, options = {}) {

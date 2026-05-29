@@ -70,6 +70,7 @@ struct session_state {
     int authenticated;
     int hello_seen;
     int closing;
+    int dropping_input;
     char peer_id[PEER_ID_TEXT_BYTES];
     char username[USERNAME_MAX + 1];
     char room[ROOM_MAX + 1];
@@ -1831,6 +1832,58 @@ cleanup:
     return ok;
 }
 
+static int enqueue_relay_text(struct session_state *state, const char *text) {
+    if (state == NULL || text == NULL || state->closing) {
+        return 0;
+    }
+
+    size_t len = bounded_strlen(text, MAX_FRAME_BYTES);
+
+    if (len == 0 || len >= MAX_FRAME_BYTES) {
+        return 0;
+    }
+
+    if (state->out_count >= OUTBOX_SIZE) {
+        return 1;
+    }
+
+    size_t slot = (state->out_head + state->out_count) % OUTBOX_SIZE;
+    memcpy(state->outbox[slot].text, text, len + 1);
+    state->outbox[slot].len = len;
+    state->out_count++;
+
+    lws_callback_on_writable(state->wsi);
+    return 1;
+}
+
+static int send_call_relay_frame(
+    struct session_state *recipient,
+    const char *call_id,
+    const char *sender_username,
+    const char *sequence,
+    const char *encrypted_frame
+) {
+    char buffer[MAX_FRAME_BYTES];
+    int written = snprintf(
+        buffer,
+        sizeof(buffer),
+        "CALL_RELAY|%s|%s|%s|%s",
+        call_id,
+        sender_username,
+        sequence,
+        encrypted_frame
+    );
+
+    if (written <= 0 || written >= (int)sizeof(buffer)) {
+        secure_clear(buffer, sizeof(buffer));
+        return 0;
+    }
+
+    int ok = enqueue_relay_text(recipient, buffer);
+    secure_clear(buffer, sizeof(buffer));
+    return ok;
+}
+
 static const char *session_failure_reason(
     const char *session_id,
     const char *device_public_key,
@@ -3030,9 +3083,8 @@ static int route_call_relay_frame(
                 continue;
             }
 
-            sent |= send_textf(
+            sent |= send_call_relay_frame(
                 client,
-                "CALL_RELAY|%s|%s|%s|%s",
                 route->call_id,
                 state->username,
                 sequence,
@@ -3061,9 +3113,8 @@ static int route_call_relay_frame(
         return 0;
     }
 
-    return send_textf(
+    return send_call_relay_frame(
         recipient,
-        "CALL_RELAY|%s|%s|%s|%s",
         route->call_id,
         state->username,
         sequence,
@@ -3283,12 +3334,29 @@ static int anonchat_callback(
             return 0;
 
         case LWS_CALLBACK_RECEIVE: {
-            if (lws_frame_is_binary(wsi) ||
-                lws_remaining_packet_payload(wsi) != 0 ||
-                !lws_is_final_fragment(wsi) ||
-                len == 0 ||
-                len >= MAX_FRAME_BYTES) {
+            if (lws_frame_is_binary(wsi) || len == 0) {
                 return -1;
+            }
+
+            if (state->dropping_input) {
+                if (lws_remaining_packet_payload(wsi) == 0 &&
+                    lws_is_final_fragment(wsi)) {
+                    state->dropping_input = 0;
+                }
+
+                return 0;
+            }
+
+            if (lws_remaining_packet_payload(wsi) != 0 ||
+                !lws_is_final_fragment(wsi)) {
+                state->dropping_input = 1;
+                (void)send_textf(state, "ERR|frame_too_large");
+                return 0;
+            }
+
+            if (len >= MAX_FRAME_BYTES) {
+                (void)send_textf(state, "ERR|frame_too_large");
+                return 0;
             }
 
             char text[MAX_FRAME_BYTES];
